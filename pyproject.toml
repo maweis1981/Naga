@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naga-mlx"
+version = "0.1.0"
+description = "A from-scratch MLX runtime for local LLM inference, serving, RAG, and MCP agents on Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Naga contributors" },
+]
+keywords = ["mlx", "llm", "inference", "apple-silicon", "rag", "mcp"]
+dependencies = [
+  "fastapi",
+  "huggingface_hub",
+  "mlx",
+  "numpy",
+  "pillow",
+  "psutil",
+  "pypdf",
+  "tokenizers",
+  "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/maweis1981/naga"
+Repository = "https://github.com/maweis1981/naga"
+Issues = "https://github.com/maweis1981/naga/issues"
+
+[project.scripts]
+naga = "naga.__main__:main"
+naga-cli = "naga.cli:main"
+naga-serve = "naga.server:main"
+naga-vlm = "naga.vlm_cli:main"
+naga-powermon = "naga.powermon:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["naga*"]
+
+[tool.setuptools.package-data]
+"naga" = ["webui/*.html"]

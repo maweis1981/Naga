@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Naga</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --user: #2b5cff; --assist: #1e2330;
+    --text: #e6e8ee; --muted: #8b93a7; --line: #262b36;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+    font: 15px/1.6 -apple-system, "SF Pro", "PingFang SC", system-ui, sans-serif;
+  }
+  header {
+    padding: 12px 18px; border-bottom: 1px solid var(--line); display: flex;
+    align-items: center; gap: 12px; background: var(--panel);
+  }
+  header .brand { display: flex; align-items: center; gap: 9px; }
+  header .brand b { font-size: 17px; letter-spacing: .3px; font-weight: 700; }
+  header .logo { display: block; border-radius: 8px; box-shadow: 0 2px 8px rgba(43,92,255,.35); }
+  header .modelsel { background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 4px 8px; font: inherit; font-size: 13px; max-width: 280px; }
+  header .gear { color: var(--muted); text-decoration: none; font-size: 18px; }
+  header .gear:hover { color: var(--text); }
+  header .spacer { flex: 1; }
+  header label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  header input[type=range] { width: 90px; }
+  button.ghost { background: none; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+  button.ghost:hover { color: var(--text); }
+  #chat { flex: 1; overflow-y: auto; padding: 22px 0; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 18px; }
+  .msg { display: flex; margin: 14px 0; }
+  .msg.user { justify-content: flex-end; }
+  .bubble { padding: 11px 15px; border-radius: 14px; max-width: 80%; white-space: pre-wrap;
+    word-break: break-word; }
+  .user .bubble { background: var(--user); color: #fff; border-bottom-right-radius: 4px; }
+  .assist .bubble { background: var(--assist); border: 1px solid var(--line);
+    border-bottom-left-radius: 4px; }
+  .role { font-size: 11px; color: var(--muted); margin: 0 4px 4px; }
+  .cursor::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 14px 0; }
+  .composer { max-width: 760px; margin: 0 auto; padding: 0 18px; display: flex; gap: 10px; }
+  textarea {
+    flex: 1; resize: none; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; font: inherit; max-height: 160px;
+  }
+  textarea:focus { outline: none; border-color: var(--user); }
+  button.send { background: var(--user); color: #fff; border: none; border-radius: 12px;
+    padding: 0 20px; font-weight: 600; cursor: pointer; }
+  button.send:disabled { opacity: .5; cursor: default; }
+  .meta { max-width: 760px; margin: 6px auto 0; padding: 0 18px; color: var(--muted); font-size: 12px; }
+  .preview { max-width: 760px; margin: 0 auto 8px; padding: 0 18px; display: flex; align-items: center; gap: 10px; }
+  .preview img { height: 56px; border-radius: 8px; border: 1px solid var(--line); }
+  .attach { align-self: flex-end; height: 44px; font-size: 16px; }
+  .bubble img { max-width: 240px; border-radius: 10px; display: block; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg class="logo" width="28" height="28" viewBox="0 0 32 32" fill="none">
+        <defs>
+          <linearGradient id="ng" x1="0" y1="0" x2="32" y2="32">
+            <stop offset="0" stop-color="#2b6bff"/><stop offset="1" stop-color="#9b3cff"/>
+          </linearGradient>
+        </defs>
+        <rect width="32" height="32" rx="8" fill="url(#ng)"/>
+        <path d="M9.5 22.5 V9.5 L22.5 22.5 V9.5" stroke="#fff" stroke-width="2.6"
+              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="22.5" cy="9.5" r="2" fill="#fff"/>
+      </svg>
+      <b>Naga</b>
+    </div>
+    <select class="modelsel" id="model" title="切换模型"></select>
+    <span class="spacer"></span>
+    <label>温度 <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.7" />
+      <span id="tempv">0.7</span></label>
+    <button class="ghost" id="clear">清空</button>
+    <a class="gear" href="/monitor" title="引擎监视器" style="text-decoration:none">📊</a>
+    <a class="gear" href="/settings" title="模型管理与设置">⚙</a>
+  </header>
+
+  <div id="chat"><div class="wrap" id="list"></div></div>
+
+  <footer>
+    <div class="preview" id="preview" style="display:none"></div>
+    <div class="composer">
+      <button class="ghost attach" id="attach" title="上传图片">📎</button>
+      <input type="file" id="file" accept="image/*" hidden />
+      <textarea id="input" rows="1" placeholder="说点什么…（📎 传图，Enter 发送，Shift+Enter 换行）"></textarea>
+      <button class="send" id="send">发送</button>
+    </div>
+    <div class="meta" id="meta"></div>
+  </footer>
+
+<script>
+const list = document.getElementById('list');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const meta = document.getElementById('meta');
+const tempEl = document.getElementById('temp');
+const tempv = document.getElementById('tempv');
+let messages = [];      // 完整对话历史，每次都整段发给后端
+let busy = false;
+let pendingImage = null; // 待发送的图片(data URL)
+
+tempEl.oninput = () => tempv.textContent = tempEl.value;
+
+// 上传图片：读成 data URL，显示预览
+const fileInput = document.getElementById('file');
+document.getElementById('attach').onclick = () => fileInput.click();
+fileInput.onchange = () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { pendingImage = r.result; showPreview(); };
+  r.readAsDataURL(f);
+};
+function showPreview() {
+  const p = document.getElementById('preview');
+  if (!pendingImage) { p.style.display = 'none'; p.innerHTML = ''; return; }
+  p.style.display = 'flex'; p.innerHTML = '';
+  const im = document.createElement('img'); im.src = pendingImage;
+  const x = document.createElement('button'); x.className = 'ghost'; x.textContent = '× 移除';
+  x.onclick = () => { pendingImage = null; fileInput.value = ''; showPreview(); };
+  p.appendChild(im); p.appendChild(x);
+}
+
+// 模型下拉：列出本地模型、标注当前、可切换（👁=支持看图）
+const modelSel = document.getElementById('model');
+async function loadModels() {
+  try {
+    const d = await (await fetch('/v1/models')).json();
+    modelSel.innerHTML = '';
+    for (const m of d.data) {
+      const o = document.createElement('option');
+      o.value = m.id;
+      o.textContent = m.id.split('/').pop() + (m.type === 'llava' ? ' 👁' : '');
+      if (m.active) o.selected = true;
+      modelSel.appendChild(o);
+    }
+  } catch (e) {}
+}
+modelSel.onchange = async () => {
+  modelSel.disabled = true;
+  await fetch('/admin/load', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: modelSel.value }) });
+  modelSel.disabled = false;
+  loadModels();
+};
+loadModels();
+
+function addBubble(role, text, imageUrl) {
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role;
+  const col = document.createElement('div');
+  const tag = document.createElement('div');
+  tag.className = 'role';
+  tag.textContent = role === 'user' ? '你' : 'Naga';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  if (imageUrl) {
+    const im = document.createElement('img');
+    im.src = imageUrl;
+    bubble.appendChild(im);
+  }
+  const span = document.createElement('span');
+  span.textContent = text;
+  bubble.appendChild(span);
+  col.appendChild(tag); col.appendChild(bubble); msg.appendChild(col);
+  list.appendChild(msg);
+  scrollDown();
+  return span;   // 流式时只更新文本部分，不动图片
+}
+function scrollDown() { const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight; }
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+});
+document.getElementById('clear').onclick = () => { messages = []; list.innerHTML = ''; meta.textContent = ''; };
+sendBtn.onclick = send;
+
+async function send() {
+  const text = input.value.trim();
+  if ((!text && !pendingImage) || busy) return;
+  busy = true; sendBtn.disabled = true;
+  input.value = ''; input.style.height = 'auto';
+
+  const img = pendingImage;
+  // 带图时按 OpenAI 多模态格式：content 是 [图, 文] 数组
+  const content = img
+    ? [{ type: 'image_url', image_url: { url: img } }, { type: 'text', text }]
+    : text;
+  messages.push({ role: 'user', content });
+  addBubble('user', text, img);
+  pendingImage = null; fileInput.value = ''; showPreview();
+
+  const bubble = addBubble('assistant', '');
+  bubble.classList.add('cursor');
+  let acc = '';
+  const t0 = performance.now();
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelSel.value || 'naga', stream: true,
+        temperature: parseFloat(tempEl.value),
+        // 历史消息里的图片只保留最后一条，其余压成纯文本
+        messages: messages.map((m, i) =>
+          (Array.isArray(m.content) && i !== messages.length - 1)
+            ? { role: m.role, content: m.content.filter(c => c.type === 'text').map(c => c.text).join('') }
+            : m),
+      }),
+    });
+
+    // 逐块读取 SSE 流：按 \n\n 切分事件，解析 data: 后的 JSON
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
+        if (delta) { acc += delta; bubble.textContent = acc; scrollDown(); }
+      }
+    }
+  } catch (err) {
+    bubble.textContent = acc + '\n[错误] ' + err;
+  }
+
+  bubble.classList.remove('cursor');
+  messages.push({ role: 'assistant', content: acc });
+  const dt = (performance.now() - t0) / 1000;
+  meta.textContent = `${acc.length} 字 · ${dt.toFixed(1)}s`;
+  busy = false; sendBtn.disabled = false; input.focus();
+}
+</script>
+</body>
+</html>

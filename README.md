@@ -1,0 +1,171 @@
+# Naga
+
+**Naga** is a high-performance, from-scratch runtime for LLM inference, serving, and agentic workloads on Apple Silicon.
+
+Built directly on top of [MLX](https://github.com/ml-explore/mlx) tensor operators, Naga implements *everything above the operator layer by itself* — the Transformer forward pass, KV-cache, sampling, quantization, prefix caching, constrained decoding, an OpenAI-compatible server, a WebUI, semantic memory, RAG, and an MCP tool-calling agent. No `transformers`, `llama.cpp`, `vLLM`, `mlx-lm`, or `ollama` under the hood.
+
+It is built for developers who want a lightweight, hackable engine to run, serve, and optimize local LLM applications — and to actually understand every layer of how an inference engine works.
+
+## Features
+
+- **Hand-written multimodal inference** — Qwen2/Qwen2.5 text models and LLaVA-style vision models (self-written SigLIP ViT + projector), with a KV-cached two-phase (prefill/decode) generation loop.
+- **Weight quantization (INT4 / INT8)** — self-written `QuantizedLinear` + `QuantizedEmbedding` on `mx.quantized_matmul`. ~1.8× faster decode, ~3× lower memory.
+- **RadixAttention prefix caching** — a radix tree that reuses KV across requests; flat per-turn latency for multi-turn chat, RAG, and agent loops.
+- **Constrained decoding** — a self-written JSON grammar automaton that guarantees valid, schema-correct tool calls even from tiny models.
+- **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, plus a self-built single-page WebUI.
+- **Local memory + RAG** — hand-written BERT embeddings, semantic retrieval, and document (txt/md/pdf) chunking & retrieval.
+- **MCP agent** — stdio MCP client with a tool-calling loop (`tool_choice: auto | required | none`).
+- **Live monitor dashboard** — `/monitor` streams every inference (prefill/decode tok/s, prefix-cache reuse, tool calls) plus a hardware panel (CPU per-core, unified memory, MLX VRAM, and — with `naga.powermon` — GPU utilization/power/thermal).
+- **Benchmark & profiling tools** — reproducible A/B harnesses for quantization, attention, prefix caching, and constrained decoding.
+
+## Requirements
+
+- macOS on Apple Silicon (M-series)
+- Python 3.10+
+
+## Open Source Readiness
+
+The repository now includes the basics expected from an open source project:
+
+- Apache-2.0 `LICENSE`
+- packaging metadata in `pyproject.toml`
+- `.gitignore` for local artifacts
+- `CONTRIBUTING.md`
+- `SECURITY.md`
+
+## Installation
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -e .
+```
+
+If you are working in an offline environment, make sure the virtualenv already has `setuptools` available before running the editable install.
+
+If you prefer not to install as a package yet, the minimum runtime dependencies are:
+
+```bash
+.venv/bin/pip install -U mlx tokenizers huggingface_hub numpy pillow fastapi uvicorn psutil pypdf
+```
+
+## Quick Start
+
+**Single-shot generation** (downloads `Qwen/Qwen2.5-0.5B-Instruct` on first run):
+
+```bash
+.venv/bin/python -m naga.cli "Explain KV-cache in three sentences."
+# or, after `pip install -e .`
+naga-cli "Explain KV-cache in three sentences."
+```
+
+**Quantized + larger model:**
+
+```bash
+.venv/bin/python -m naga.cli --model Qwen/Qwen2.5-3B-Instruct --quantize --bits 4 "你好"
+```
+
+**Serve an OpenAI-compatible API + WebUI:**
+
+```bash
+.venv/bin/python -m naga serve            # then open http://localhost:8000
+# or: naga serve
+```
+
+If you bind the server to anything other than `127.0.0.1`, set an admin token first:
+
+```bash
+export NAGA_ADMIN_TOKEN="change-me"
+.venv/bin/python -m naga serve --host 0.0.0.0
+```
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"naga","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+**Unified CLI** (talks to the running server):
+
+```bash
+.venv/bin/python -m naga chat "你好"      # one-shot
+.venv/bin/python -m naga chat -i          # interactive
+.venv/bin/python -m naga models           # list local models
+.venv/bin/python -m naga use Qwen/Qwen2.5-3B-Instruct
+# or the installed console script:
+naga chat "你好"
+```
+
+**Available console scripts after `pip install -e .`:**
+
+```bash
+naga        # unified thin client: serve/chat/models/use/pull/...
+naga-cli    # direct local single-shot inference
+naga-serve  # OpenAI-compatible server + WebUI
+naga-vlm    # direct multimodal CLI
+```
+
+Runtime data (settings, memory, documents, MCP servers) lives under `~/.naga/`.
+
+## Security Notes
+
+- `Naga` is intended for local use by default.
+- `/admin/*` endpoints are treated as privileged operations.
+- Remote admin access is blocked unless `NAGA_ADMIN_TOKEN` or `--admin-token` is set.
+- CORS defaults are limited to localhost-style origins; use `NAGA_CORS_ORIGINS` if you need extra trusted origins.
+
+## Project Status
+
+This repository is already feature-rich, but it is still closer to an advanced hacking-friendly runtime than a polished packaged release. The new `pyproject.toml` makes it installable with standard Python tooling, which is the easiest way to keep the CLI, server, and WebUI entry points aligned.
+
+## Performance
+
+Qwen2.5-3B on an Apple M2 Max (32 GB), greedy decode, same prompt:
+
+| Engine | decode tok/s | peak memory |
+|---|---|---|
+| Naga (bf16) | 41 | 6.3 GB |
+| Naga (Q8) | 60 | 3.4 GB |
+| **Naga (Q4)** | **75** | **1.9 GB** |
+| ollama (Q4_K_M) | 107 | — |
+
+Naga's hand-written engine reaches ~70% of ollama's heavily-optimized Q4 decode speed, with prefix caching delivering up to **7.9× faster** time-to-first-token on multi-turn conversations. See `scratch_*.py` for the reproducible benchmarks.
+
+## Architecture & Roadmap
+
+Everything above the MLX tensor-operator layer is implemented from scratch.
+
+| Stage | Content | Status |
+|---|---|---|
+| **P0** | Engine core: Transformer forward + single-shot CLI | ✅ |
+| **P1** | KV-cache + sampling (temperature / top-p) + streaming | ✅ |
+| **P2** | OpenAI-compatible HTTP API (`/v1/chat/completions` + SSE) | ✅ |
+| **P3** | Concurrent scheduling / continuous batching | ⬜ |
+| **P4** | Multimodal vision (self-written SigLIP ViT + projector) | ✅ |
+| **P5** | WebUI (self-built single-page streaming chat) | ✅ |
+| **P6** | Model management (scan / hot-swap / download) + settings | ✅ |
+| **P7** | Unified CLI (chat/models/use/pull/serve) | ✅ |
+| **P8** | Local memory (hand-written BERT embeddings + semantic retrieval) | ✅ |
+| **P9** | Document management + RAG (txt/md/pdf chunk embedding & retrieval) | ✅ |
+| **P10** | MCP client + multi-server config + tool-calling agent loop | ✅ |
+| **P11** | Weight quantization (INT4/INT8, self-written quantized layers) | ✅ |
+| **P12** | Fused attention fast path (optional `--fast-attn`) | ✅ |
+| **P13** | RadixAttention prefix KV cache | ✅ |
+| **P14** | Constrained decoding (JSON grammar + tool-call constraint) | ✅ |
+
+```
+naga/
+├── config.py / loader.py / tokenizer.py   # model args, weight loading, tokenization
+├── models/qwen2.py                        # hand-written Qwen2 forward (Attention/RoPE/GQA/SwiGLU)
+├── models/siglip.py / llava.py / bert.py  # vision encoder, VLM, embedding model
+├── generate.py                            # autoregressive / cached / constrained generation
+├── cache.py / radix.py                    # KV-cache + RadixAttention prefix cache
+├── quantize.py / constrain.py             # INT4/INT8 quantization, constrained decoding
+├── engine.py / server.py / webui/         # engine wrapper, OpenAI API, WebUI
+├── memory.py / docstore.py / embed.py     # semantic memory + RAG
+└── mcp.py / agent.py                       # MCP client + tool-calling agent
+```
+
+## License
+
+Naga is licensed under the Apache License 2.0.
