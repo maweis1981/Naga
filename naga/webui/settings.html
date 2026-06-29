@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Naga · 设置</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --accent:#2b5cff; --text:#e6e8ee; --muted:#8b93a7; --line:#262b36; --ok:#1f9d55; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.6 -apple-system,"PingFang SC",system-ui,sans-serif; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel);
+    display:flex; align-items:center; gap:12px; }
+  header .brand { display:flex; align-items:center; gap:9px; }
+  header b { font-size:17px; letter-spacing:.3px; }
+  header .logo { border-radius:8px; box-shadow:0 2px 8px rgba(43,92,255,.35); }
+  header a { color:var(--muted); text-decoration:none; }
+  header a:hover { color:var(--text); }
+  .wrap { max-width:780px; margin:0 auto; padding:24px 18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px; margin-bottom:18px; }
+  h2 { font-size:15px; margin:0 0 14px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:10px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:none; }
+  .mid { color:var(--muted); font-size:13px; }
+  .path { cursor:pointer; margin-left:8px; max-width:340px; display:inline-block; vertical-align:bottom;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .path:hover { color:var(--accent); text-decoration:underline; }
+  .rowbtns { display:flex; align-items:center; gap:10px; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:6px; border:1px solid var(--line); color:var(--muted); }
+  .tag.llava { color:#c08bff; border-color:#3a2b55; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:7px 14px; cursor:pointer; font:inherit; }
+  button.ghost { background:none; border:1px solid var(--line); color:var(--muted); }
+  button:disabled { opacity:.5; cursor:default; }
+  .active-badge { color:var(--ok); font-size:12px; font-weight:600; }
+  input, textarea { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:9px 11px; font:inherit; }
+  textarea { resize:vertical; min-height:64px; }
+  label { display:block; color:var(--muted); font-size:13px; margin:12px 0 5px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+  .dl { display:flex; gap:10px; } .dl input { flex:1; }
+  .status { color:var(--muted); font-size:13px; margin-top:8px; }
+  .save-row { display:flex; align-items:center; gap:12px; margin-top:16px; }
+  .saved { color:var(--ok); font-size:13px; opacity:0; transition:opacity .3s; }
+  .saved.show { opacity:1; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg class="logo" width="26" height="26" viewBox="0 0 32 32" fill="none">
+        <defs>
+          <linearGradient id="ng" x1="0" y1="0" x2="32" y2="32">
+            <stop offset="0" stop-color="#2b6bff"/><stop offset="1" stop-color="#9b3cff"/>
+          </linearGradient>
+        </defs>
+        <rect width="32" height="32" rx="8" fill="url(#ng)"/>
+        <path d="M9.5 22.5 V9.5 L22.5 22.5 V9.5" stroke="#fff" stroke-width="2.6"
+              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="22.5" cy="9.5" r="2" fill="#fff"/>
+      </svg>
+      <b>Naga · 设置</b>
+    </div>
+    <span style="flex:1"></span>
+    <a href="/">← 返回聊天</a>
+  </header>
+  <div class="wrap">
+
+    <div class="card">
+      <h2>本地模型</h2>
+      <div id="models" class="mid">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>下载新模型</h2>
+      <div class="dl">
+        <input id="repo" placeholder="HuggingFace 仓库名，如 Qwen/Qwen2.5-3B-Instruct" />
+        <button id="dl">下载</button>
+      </div>
+      <div class="status" id="dlstatus"></div>
+    </div>
+
+    <div class="card">
+      <h2>记忆 Memory</h2>
+      <label style="display:flex; align-items:center; gap:8px; margin:0 0 12px; color:var(--text)">
+        <input type="checkbox" id="memory_enabled" style="width:auto" />
+        对话时自动检索并注入相关记忆（语义检索）
+      </label>
+      <div class="dl">
+        <input id="memtext" placeholder="记住一件事，如：我叫马伟，喜欢简洁专业的回答" />
+        <button id="memadd">记住</button>
+      </div>
+      <div id="memlist" class="mid" style="margin-top:12px">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>知识库 · 文档 / 挂载</h2>
+      <label style="display:flex; align-items:center; gap:8px; margin:0 0 12px; color:var(--text)">
+        <input type="checkbox" id="rag_enabled" style="width:auto" />
+        对话时自动检索并注入相关文档（RAG）
+      </label>
+      <div class="dl">
+        <input id="docpath" placeholder="文件或目录的绝对路径，如 /Users/mawei/docs 或 /Volumes/网盘" />
+        <button id="docadd">索引</button>
+      </div>
+      <div class="status" id="docstatus"></div>
+      <div id="doclist" class="mid" style="margin-top:12px">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>MCP 工具</h2>
+      <label style="display:flex; align-items:center; gap:8px; margin:0 0 12px; color:var(--text)">
+        <input type="checkbox" id="mcp_enabled" style="width:auto" />
+        对话时启用工具调用（Agent 循环，建议搭配 7B+ 模型）
+      </label>
+      <div class="dl" style="flex-wrap:wrap; gap:8px">
+        <input id="mcpname" placeholder="名称，如 demo" style="flex:0 0 110px" />
+        <input id="mcpcmd" placeholder="命令，如 python3" style="flex:0 0 130px" />
+        <input id="mcpargs" placeholder="参数（空格分隔），如 /路径/mcp_demo_server.py" style="flex:1" />
+        <button id="mcpadd">添加</button>
+      </div>
+      <div class="status" id="mcpstatus"></div>
+      <div id="mcplist" class="mid" style="margin-top:12px">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>默认生成参数 & 系统提示词</h2>
+      <div class="grid3">
+        <div><label>温度 temperature</label><input id="temperature" type="number" step="0.1" min="0" max="2" /></div>
+        <div><label>top_p</label><input id="top_p" type="number" step="0.05" min="0" max="1" /></div>
+        <div><label>最大生成 tokens</label><input id="max_tokens" type="number" min="1" /></div>
+      </div>
+      <label>系统提示词 system prompt（留空则用模型默认）</label>
+      <textarea id="system_prompt" placeholder="例如：你是一个简洁、专业的中文助手。"></textarea>
+      <div class="save-row">
+        <button id="save">保存设置</button>
+        <span class="saved" id="saved">已保存 ✓</span>
+      </div>
+    </div>
+
+  </div>
+
+<script>
+async function api(path, body) {
+  const opt = body ? { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) } : {};
+  return (await fetch(path, opt)).json();
+}
+
+async function refresh() {
+  const st = await api('/admin/state');
+  // 模型列表
+  const box = document.getElementById('models');
+  if (!st.available.length) { box.textContent = '（缓存里还没有模型）'; }
+  else {
+    box.innerHTML = '';
+    for (const m of st.available) {
+      const isActive = m.id === st.active;
+      const row = document.createElement('div'); row.className = 'row';
+      const left = document.createElement('div');
+      left.innerHTML = `<div>${m.id}</div>` +
+        `<div class="mid"><span class="tag ${m.type==='llava'?'llava':''}">${m.type}</span> ${m.size_gb} GB` +
+        `<span class="path" title="${m.path}">📁 ${m.path}</span></div>`;
+      // 点路径 = 在访达里打开该模型目录
+      left.querySelector('.path').onclick = () => api('/admin/reveal', { model: m.id });
+
+      const right = document.createElement('div'); right.className = 'rowbtns';
+      const open = document.createElement('button'); open.className = 'ghost'; open.textContent = '打开位置';
+      open.onclick = () => api('/admin/reveal', { model: m.id });
+      right.appendChild(open);
+      if (isActive) {
+        const badge = document.createElement('span'); badge.className = 'active-badge'; badge.textContent = '● 当前使用';
+        right.appendChild(badge);
+      } else {
+        const b = document.createElement('button'); b.className = 'ghost'; b.textContent = '切换到此';
+        b.onclick = async () => { b.textContent = '加载中…'; b.disabled = true; await api('/admin/load', { model: m.id }); refresh(); };
+        right.appendChild(b);
+      }
+      row.appendChild(left); row.appendChild(right); box.appendChild(row);
+    }
+  }
+  // 下载状态
+  document.getElementById('dlstatus').textContent =
+    st.download_status && st.download_status !== 'idle' ? '下载：' + st.download_status : '';
+  // 设置表单（仅首次填充，避免覆盖正在编辑的内容）
+  if (!window._filled) {
+    for (const k of ['temperature','top_p','max_tokens','system_prompt'])
+      document.getElementById(k).value = st.settings[k];
+    document.getElementById('memory_enabled').checked = !!st.settings.memory_enabled;
+    document.getElementById('rag_enabled').checked = !!st.settings.rag_enabled;
+    document.getElementById('mcp_enabled').checked = !!st.settings.mcp_enabled;
+    window._filled = true;
+  }
+}
+
+async function loadMcp() {
+  const st = await api('/admin/mcp');
+  const box = document.getElementById('mcplist');
+  if (!st.servers.length) { box.textContent = '（还没有 MCP 服务器）'; return; }
+  box.innerHTML = '';
+  for (const s of st.servers) {
+    const row = document.createElement('div'); row.className = 'row';
+    const left = document.createElement('div');
+    const flag = s.connected ? '✓' : '✗';
+    const tools = s.tools.length ? ` · 工具: ${s.tools.join(', ')}` : '';
+    left.innerHTML = `<div style="color:var(--text)">${flag} ${s.name} <span class="mid">${s.command} ${s.args.join(' ')}</span></div>` +
+      `<div class="mid">${s.error ? '错误: ' + s.error : '已连接' + tools}</div>`;
+    const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '移除';
+    del.onclick = async () => { await api('/admin/mcp/remove', { name: s.name }); loadMcp(); };
+    row.appendChild(left); row.appendChild(del); box.appendChild(row);
+  }
+}
+document.getElementById('mcpadd').onclick = async () => {
+  const name = document.getElementById('mcpname').value.trim();
+  const command = document.getElementById('mcpcmd').value.trim();
+  const args = document.getElementById('mcpargs').value.trim().split(/\s+/).filter(Boolean);
+  if (!name || !command) return;
+  document.getElementById('mcpstatus').textContent = '连接中…';
+  const r = await api('/admin/mcp/add', { name, command, args });
+  document.getElementById('mcpstatus').textContent = r.ok ? '✓ 已连接' : '✗ ' + r.error;
+  document.getElementById('mcpname').value = ''; document.getElementById('mcpcmd').value = '';
+  document.getElementById('mcpargs').value = ''; loadMcp();
+};
+
+async function loadDocs() {
+  const st = await api('/admin/docs');
+  const box = document.getElementById('doclist');
+  let html = '';
+  if (st.sources.length)
+    html += st.sources.map(s => `<div>📂 ${s}</div>`).join('') + '<div style="height:6px"></div>';
+  box.innerHTML = html;
+  if (!st.docs.length) { box.innerHTML += '（还没有文档）'; return; }
+  for (const d of st.docs) {
+    const row = document.createElement('div'); row.className = 'row';
+    const t = document.createElement('div');
+    t.innerHTML = `<div style="color:var(--text)">📄 ${d.name} <span class="mid">(${d.chunks} 块)</span></div>` +
+      `<div class="path" title="${d.path}">${d.path}</div>`;
+    const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '移除';
+    del.onclick = async () => { await api('/admin/docs/remove', { path: d.path }); loadDocs(); };
+    row.appendChild(t); row.appendChild(del); box.appendChild(row);
+  }
+}
+document.getElementById('docadd').onclick = async () => {
+  const el = document.getElementById('docpath');
+  if (!el.value.trim()) return;
+  document.getElementById('docstatus').textContent = '索引中…（大目录可能要一会儿）';
+  const r = await api('/admin/docs/add', { path: el.value.trim() });
+  const files = r.files || [];
+  const ok = files.filter(f => f.ok).length;
+  const chunks = files.reduce((a, f) => a + (f.chunks || 0), 0);
+  document.getElementById('docstatus').textContent =
+    r.error ? '✗ ' + r.error : `✓ 索引了 ${ok} 个文件，共 ${chunks} 个文本块`;
+  el.value = ''; loadDocs();
+};
+
+async function loadMemory() {
+  const items = (await api('/admin/memory')).items;
+  const box = document.getElementById('memlist');
+  if (!items.length) { box.textContent = '（还没有记忆）'; return; }
+  box.innerHTML = '';
+  for (const it of items) {
+    const row = document.createElement('div'); row.className = 'row';
+    const t = document.createElement('div'); t.textContent = it.text; t.style.color = 'var(--text)';
+    const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '删除';
+    del.onclick = async () => { await api('/admin/memory/delete', { id: it.id }); loadMemory(); };
+    row.appendChild(t); row.appendChild(del); box.appendChild(row);
+  }
+}
+document.getElementById('memadd').onclick = async () => {
+  const el = document.getElementById('memtext');
+  if (!el.value.trim()) return;
+  await api('/admin/memory/add', { text: el.value.trim() });
+  el.value = ''; loadMemory();
+};
+
+document.getElementById('dl').onclick = async () => {
+  const repo = document.getElementById('repo').value.trim();
+  if (!repo) return;
+  await api('/admin/download', { repo });
+  pollDownload();
+};
+function pollDownload() {
+  refresh();
+  const t = setInterval(async () => {
+    const st = await api('/admin/state');
+    document.getElementById('dlstatus').textContent = '下载：' + st.download_status;
+    if (/完成|失败/.test(st.download_status)) { clearInterval(t); refresh(); }
+  }, 2000);
+}
+
+document.getElementById('save').onclick = async () => {
+  const body = {
+    temperature: parseFloat(temperature.value),
+    top_p: parseFloat(top_p.value),
+    max_tokens: parseInt(max_tokens.value),
+    system_prompt: system_prompt.value,
+    memory_enabled: document.getElementById('memory_enabled').checked,
+    rag_enabled: document.getElementById('rag_enabled').checked,
+    mcp_enabled: document.getElementById('mcp_enabled').checked,
+  };
+  await api('/admin/settings', body);
+  const s = document.getElementById('saved'); s.classList.add('show');
+  setTimeout(() => s.classList.remove('show'), 1500);
+};
+
+refresh();
+loadMemory();
+loadDocs();
+loadMcp();
+</script>
+</body>
+</html>
