@@ -124,6 +124,37 @@ def monitor_hw():
     return {"static": hwstats.static(), "sample": hwstats.sample(), "power": hwstats.power()}
 
 
+@app.get("/health")
+def health():
+    """健康探针：供 Open WebUI / 反向代理 / 编排器判断服务是否就绪。"""
+    active = manager.active if manager else None
+    return {"status": "ok", "service": "naga", "active_model": active}
+
+
+@app.get("/metrics")
+def metrics():
+    """自观测指标（JSON）：decode tok/s 分位、TTFT 分布、前缀缓存复用率、各模型吞吐、工具频次。
+
+    这是 Naga 的「自跟踪—自优化」闭环对外的结构化出口：每次推理都在更新这份画像，
+    据此可判断量化 / 前缀缓存 / 换模型是否真的带来收益。"""
+    snap = monitor.stats.snapshot()
+    if manager is not None:                       # 叠加一帧硬件采样，便于关联吞吐与功耗/显存
+        try:
+            from . import hwstats
+            snap["hardware"] = {"sample": hwstats.sample(), "power": hwstats.power()}
+        except Exception:
+            pass
+    return snap
+
+
+@app.get("/metrics/prometheus")
+def metrics_prometheus():
+    """Prometheus 文本曝光格式：可直接被 Prometheus / Grafana / OpenTelemetry Collector 抓取。"""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(monitor.stats.prometheus(),
+                             media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
 @app.get("/monitor/stream")
 async def monitor_stream():
     """SSE 实时事件流：新事件一产生就推给页面。"""
@@ -151,8 +182,9 @@ async def monitor_stream():
 @app.get("/v1/models")
 def list_models():
     st = manager.state()
+    created = int(time.time())
     data = [{
-        "id": m["id"], "object": "model", "created": 0, "owned_by": "naga",
+        "id": m["id"], "object": "model", "created": created, "owned_by": "naga",
         "type": m["type"], "size_gb": m["size_gb"],
         "active": m["id"] == st["active"], "loaded": m["id"] in st["loaded"],
     } for m in st["available"]]
@@ -220,10 +252,14 @@ async def chat_completions(req: Request):
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     stream = bool(body.get("stream", False))
+    # OpenAI 语义：stream_options.include_usage=true 时，在 [DONE] 前补发一帧 usage
+    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
 
     # MCP 工具调用：开启且有可用工具时，走 Agent 循环
     if manager.settings.get("mcp_enabled") and manager.mcp.tools():
         from .agent import run_agent
+
+        prompt_tokens = _count_tokens(engine, messages)
 
         def pieces():
             for kind, data in run_agent(engine, manager.mcp, messages, **_params(body)):
@@ -241,38 +277,48 @@ async def chat_completions(req: Request):
         if stream:
             def sse_tool():
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+                collected: list[str] = []
                 for p in pieces():
+                    collected.append(p)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {'content': p}), ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
+                if include_usage:
+                    completion_tokens = len(engine.tok.encode("".join(collected)))
+                    usage = _usage(prompt_tokens, completion_tokens)
+                    yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, usage))}\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(sse_tool(), media_type="text/event-stream")
 
         text = "".join(pieces())
+        completion_tokens = len(engine.tok.encode(text)) if text else 0
         return JSONResponse({
             "id": cid, "object": "chat.completion", "created": created, "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": _usage(prompt_tokens, completion_tokens),
         })
 
     if stream:
         def sse():
             yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+            usage = _usage(0, 0)
             for ch in engine.stream(messages, **_params(body)):
                 if ch.done:
+                    usage = _usage(ch.prompt_tokens, ch.completion_tokens)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
                 else:
                     obj = _chunk(cid, created, model_name, {"content": ch.delta})
                     yield f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+            if include_usage:
+                yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, usage))}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(sse(), media_type="text/event-stream")
 
     text = ""
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    usage = _usage(0, 0)
     for ch in engine.stream(messages, **_params(body)):
         if ch.done:
-            usage = {"prompt_tokens": ch.prompt_tokens, "completion_tokens": ch.completion_tokens,
-                     "total_tokens": ch.prompt_tokens + ch.completion_tokens}
+            usage = _usage(ch.prompt_tokens, ch.completion_tokens)
         else:
             text += ch.delta
     return JSONResponse({
@@ -286,6 +332,27 @@ async def chat_completions(req: Request):
 def _chunk(cid, created, model, delta, finish=None):
     return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def _usage(prompt_tokens: int, completion_tokens: int) -> dict:
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens}
+
+
+def _usage_chunk(cid, created, model, usage):
+    """OpenAI 流式用量帧：choices 为空、只带 usage，紧跟在 stop 之后、[DONE] 之前。
+
+    Open WebUI 等前端在 stream_options.include_usage=true 时依赖这一帧做 token 计量。"""
+    return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [], "usage": usage}
+
+
+def _count_tokens(engine, messages: list[dict]) -> int:
+    """估算一组 messages 套上对话模板后的 token 数（工具调用路径补 usage 用）。"""
+    try:
+        return len(engine.tok.encode(engine.tok.apply_chat_template(messages)))
+    except Exception:
+        return 0
 
 
 @app.post("/v1/embeddings")

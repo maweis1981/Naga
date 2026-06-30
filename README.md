@@ -14,8 +14,10 @@ It is built for developers who want a lightweight, hackable engine to run, serve
 - **Constrained decoding** — a self-written JSON grammar automaton that guarantees valid, schema-correct tool calls even from tiny models.
 - **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, plus a self-built single-page WebUI.
 - **Local memory + RAG** — hand-written BERT embeddings, semantic retrieval, and document (txt/md/pdf) chunking & retrieval.
-- **MCP agent** — stdio MCP client with a tool-calling loop (`tool_choice: auto | required | none`).
+- **MCP agent** — stdio MCP client (with per-call timeouts so a stalled server can't hang a request) and a tool-calling loop (`tool_choice: auto | required | none`).
+- **Agent SDK** — an importable `Agent` class + `@tool` decorator (`naga.sdk`) that turns plain Python functions into tools (JSON schema auto-derived from type hints) and runs the constrained tool-calling loop locally, composable with MCP servers. See `examples/agent_sdk_demo.py`.
 - **Live monitor dashboard** — `/monitor` streams every inference (prefill/decode tok/s, prefix-cache reuse, tool calls) plus a hardware panel (CPU per-core, unified memory, MLX VRAM, and — with `naga.powermon` — GPU utilization/power/thermal).
+- **Self-observability & metrics** — the same event stream is rolled up into optimization-grade metrics: `GET /metrics` (JSON: decode tok/s p50/p95, TTFT distribution, prefix-cache reuse ratio, per-model throughput, tool frequency) and `GET /metrics/prometheus` (Prometheus exposition for Grafana/OpenTelemetry), plus a `GET /health` probe for Open WebUI and orchestrators.
 - **Benchmark & profiling tools** — reproducible A/B harnesses for quantization, attention, prefix caching, and constrained decoding.
 
 ## Requirements
@@ -48,6 +50,20 @@ If you prefer not to install as a package yet, the minimum runtime dependencies 
 ```bash
 .venv/bin/pip install -U mlx tokenizers huggingface_hub numpy pillow fastapi uvicorn psutil pypdf
 ```
+
+## Development & Tests
+
+Install dev extras and run the suite (no model download or GPU needed — it uses stub
+engines, a fake stdio MCP server, and FastAPI's TestClient):
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest -q
+```
+
+The tests cover the self-observability aggregation (`/metrics` + Prometheus), the
+OpenAI-compatible server (streaming `usage`, `/v1/models`, `/health`), the Agent SDK
+(`@tool` schema derivation + tool-calling loop), and the MCP client's call/timeout paths.
 
 ## Quick Start
 
@@ -152,6 +168,8 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P12** | Fused attention fast path (optional `--fast-attn`) | ✅ |
 | **P13** | RadixAttention prefix KV cache | ✅ |
 | **P14** | Constrained decoding (JSON grammar + tool-call constraint) | ✅ |
+| **P15** | Self-observability: rolled-up metrics (`/metrics` JSON + Prometheus) + `/health` | ✅ |
+| **P16** | Agent SDK (`naga.sdk`: `Agent` + `@tool`, local functions + MCP) | ✅ |
 
 ```
 naga/
