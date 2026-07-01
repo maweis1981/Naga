@@ -401,8 +401,12 @@ async def chat_completions(req: Request):
         prompt_tokens = _count_tokens(engine, messages)
 
         def pieces():
+            # 逐 token 转发 delta（普通回答/工具后作答都有打字机效果）；tool_call/tool_result
+            # 转成可读标记；final 跳过（内容已由 delta 流出，避免重复）。
             for kind, data in run_agent(engine, manager.mcp, messages, **_params(body)):
-                if kind == "tool_call":
+                if kind == "delta":
+                    yield data
+                elif kind == "tool_call":
                     monitor.emit("tool_call", name=data["name"],
                                  arguments=data.get("arguments", {}))
                     yield f"\n🔧 调用 `{data['name']}`（{json.dumps(data.get('arguments', {}), ensure_ascii=False)}）\n"
@@ -410,8 +414,7 @@ async def chat_completions(req: Request):
                     monitor.emit("tool_result", name=data["name"],
                                  result=str(data["result"])[:300])
                     yield f"↩ {data['result']}\n\n"
-                else:
-                    yield data
+                # kind == "final": 已由 delta 流出，忽略
 
         if stream:
             async def sse_tool():

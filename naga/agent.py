@@ -80,33 +80,77 @@ def _looks_like_tool_attempt(text: str, names: list[str]) -> bool:
             or any(n in text for n in names))
 
 
+def _peek_stream(engine, msgs, params):
+    """流式生成，但先"窥视"开头判断是不是工具调用尝试。
+
+    返回 (looks_tool, buffered, gen)：buffered 是已消费的开头 delta 列表，gen 是尚未消费
+    的剩余生成器。工具调用会以 `<` / `{` 或 tool_call 开头——不像工具调用就可以放心一路
+    流式吐给用户（普通回答有打字机效果）；像工具调用才需要收全再解析。"""
+    gen = engine.stream(msgs, **params)
+    buffered: list[str] = []
+    looks_tool = False
+    for ch in gen:
+        if ch.done:
+            break
+        if ch.delta:
+            buffered.append(ch.delta)
+        head = "".join(buffered).lstrip()
+        if head:                                  # 拿到第一段可见文本即可判定
+            looks_tool = head[0] in "<{" or head.lower().startswith("tool_call")
+            break
+    return looks_tool, buffered, gen
+
+
 def run_agent(engine, mcp, messages, max_steps: int = 5,
               tool_choice: str = "auto", **params):
-    """生成器，逐步 yield (kind, data)：kind ∈ {'tool_call','tool_result','final'}。
+    """生成器，逐步 yield (kind, data)：kind ∈ {'delta','tool_call','tool_result','final'}。
 
-    tool_choice（仿 OpenAI 语义，约束解码是落地手段）：
-      'auto'（默认）—— 模型自己决定。它像要调工具却格式/名字错时，用约束解码修复。
-      'required'   —— 强制第一步必产出一个合法工具调用（应用已决定要用工具时）。
-                      即便 0.5B 小模型也稳，因为非法 token 在采样层被屏蔽。
-      'none'       —— 不修复、不强制，纯自由生成（基线）。"""
+    'delta' 是最终答案的逐 token 增量（含工具执行后的作答也流式）；'final' 在结尾再发一次
+    完整答案，方便只要聚合结果的消费者（如 Agent SDK）。普通回答只有第一段被短暂缓冲用于
+    判别是否工具调用，其余一路流式——修掉了"开了 MCP 后普通对话整段返回、不流式"的问题。
+
+    tool_choice（仿 OpenAI 语义）：'auto' 模型自决（格式错用约束解码修复）；'required' 强制
+    首步产出合法工具调用；'none' 纯自由生成。"""
     tools = mcp.tools()
     names = [t["name"] for t in tools]
     msgs = list(messages)
     if tools:
         msgs = [{"role": "system", "content": build_tool_prompt(tools)}] + msgs
 
+    def stream_answer(buffered, gen):
+        """把已缓冲开头 + 剩余生成逐 token yield 成 delta，末尾发一次 final。"""
+        parts: list[str] = []
+        for d in buffered:
+            if d:
+                parts.append(d)
+                yield ("delta", d)
+        for ch in gen:
+            if ch.done:
+                break
+            if ch.delta:
+                parts.append(ch.delta)
+                yield ("delta", ch.delta)
+        yield ("final", "".join(parts))
+
+    text = ""
     for step in range(max_steps):
         text = ""
         if tool_choice == "required" and step == 0 and tools:
             call = constrained_tool_call(engine, msgs, tools)   # 强制：保证合法调用
         else:
-            text = "".join(ch.delta for ch in engine.stream(msgs, **params) if not ch.done)
+            looks_tool, buffered, gen = _peek_stream(engine, msgs, params)
+            if not looks_tool:                    # 普通回答：直接流式吐出，结束
+                yield from stream_answer(buffered, gen)
+                return
+            # 像工具调用：收全剩余、解析
+            text = "".join(buffered) + "".join(ch.delta for ch in gen if not ch.done)
             call = parse_tool_call(text)
-            # auto：模型像在尝试调用、但自由解析没拿到合法调用 -> 约束修复
             if tool_choice == "auto" and tools and not _valid_call(call, names) \
                     and _looks_like_tool_attempt(text, names):
                 call = constrained_tool_call(engine, msgs, tools)
-        if not _valid_call(call, names):
+        if not _valid_call(call, names):          # 不是有效工具调用 -> 当最终答案
+            if text:
+                yield ("delta", text)
             yield ("final", text)
             return
         yield ("tool_call", call)
@@ -118,4 +162,6 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
             {"role": "assistant", "content": assistant_text},
             {"role": "user", "content": f"<tool_response>{result}</tool_response>\n请根据该结果回答用户的问题。"},
         ]
+    if text:
+        yield ("delta", text)
     yield ("final", text)
