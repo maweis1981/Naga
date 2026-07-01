@@ -66,6 +66,28 @@ The tests cover the self-observability aggregation (`/metrics` + Prometheus), th
 OpenAI-compatible server (streaming `usage`, `/v1/models`, `/health`), the Agent SDK
 (`@tool` schema derivation + tool-calling loop), and the MCP client's call/timeout paths.
 
+## Benchmarking
+
+`bench/benchmark_serving.py` is a standard LLM-serving benchmark (metrics aligned with
+vLLM's `benchmark_serving` / LLMPerf): **TTFT** (time to first token), **TPOT** (time per
+output token), **ITL** (inter-token latency), **E2E** latency, and request/output token
+throughput — each reported as mean / median / p99. It drives the OpenAI streaming API
+(`stream_options.include_usage` for exact token counts) and is stdlib-only.
+
+```bash
+naga serve --model Qwen/Qwen2.5-0.5B-Instruct           # in one terminal
+# for a pure-inference measurement, turn off RAG/memory/MCP context injection:
+curl -s localhost:8000/admin/settings -H 'Content-Type: application/json' \
+  -d '{"rag_enabled":false,"memory_enabled":false,"mcp_enabled":false}'
+python bench/benchmark_serving.py --url http://127.0.0.1:8000 \
+  --model Qwen/Qwen2.5-0.5B-Instruct --num-prompts 24 --concurrency 8 --max-tokens 128
+```
+
+Example (Qwen2.5-0.5B bf16, M-series): at concurrency 1, TTFT ≈ 18 ms, TPOT ≈ 8.5 ms
+(~117 tok/s decode). Because the scheduler is single-worker serial, raising concurrency
+keeps aggregate output throughput flat (~115 tok/s) while TTFT grows with queue depth —
+the case the batched-decode path (`POST /batch`) is built to improve.
+
 ## Quick Start
 
 **Single-shot generation** (downloads `Qwen/Qwen2.5-0.5B-Instruct` on first run):
