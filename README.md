@@ -129,6 +129,30 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"naga","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
+**Connecting [Open WebUI](https://github.com/open-webui/open-webui):**
+
+Naga is a drop-in OpenAI backend. In Open WebUI: **Settings → Connections → OpenAI API**,
+set the base URL to `http://localhost:8000/v1` and any non-empty API key. Or run it in Docker
+already pointed at Naga:
+
+```bash
+docker run -d --name open-webui -p 3000:8080 \
+  -v open-webui:/app/backend/data \
+  --add-host host.docker.internal:host-gateway \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e OPENAI_API_KEY=naga \
+  -e ENABLE_OLLAMA_API=False \
+  ghcr.io/open-webui/open-webui:main
+```
+
+> ⚠️ **Docker networking gotcha (the #1 reason the model list is empty):** from *inside* the
+> container, `localhost` is the container itself — **not** your Mac. Use
+> `http://host.docker.internal:8000/v1`, never `http://localhost:8000/v1`. Also note Open WebUI's
+> **PersistentConfig**: the `OPENAI_API_BASE_URL` env is only written to its DB on the *first*
+> start of a fresh data volume — if you reuse an old volume, fix the URL in the UI
+> (Settings → Connections) instead, since the env is ignored. And if you bind Naga to a
+> non-loopback host so a container can reach it, set `NAGA_ADMIN_TOKEN` (see Security Notes).
+
 **Unified CLI** (talks to the running server):
 
 ```bash
