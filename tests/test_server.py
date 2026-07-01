@@ -80,6 +80,26 @@ def test_embeddings_validation(client):
     assert r.status_code == 400
 
 
+def test_batch_endpoint(client):
+    r = client.post("/batch", json={"model": "naga-test", "inputs": [
+        [{"role": "user", "content": "one"}],
+        [{"role": "user", "content": "two"}],
+        [{"role": "user", "content": "three"}],
+    ]})
+    assert r.status_code == 200
+    body = r.json()
+    comps = body["completions"]
+    assert [c["index"] for c in comps] == [0, 1, 2]
+    assert comps[0]["message"]["content"] == "echo:one"      # 不串台
+    assert comps[2]["message"]["content"] == "echo:three"
+    assert comps[0]["usage"]["total_tokens"] == 7
+
+
+def test_batch_endpoint_requires_inputs(client):
+    r = client.post("/batch", json={"model": "naga-test"})
+    assert r.status_code == 400
+
+
 def test_metrics_advice(client):
     r = client.get("/metrics/advice")
     assert r.status_code == 200

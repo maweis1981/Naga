@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterator
 
-from .generate import generate, generate_cached, generate_vlm
+from .generate import batched_generate, generate, generate_cached, generate_vlm
 from .image import preprocess
 from .loader import load_model, load_vlm
 from .monitor import monitor
@@ -94,6 +94,43 @@ class Engine:
                      prompt_tokens=len(prompt_ids), completion_tokens=n,
                      ttft_ms=round(ttft_ms), decode_tok_s=round(tok_s, 1))
         yield Chunk(done=True, prompt_tokens=len(prompt_ids), completion_tokens=len(gen_ids))
+
+    def batch_generate(
+        self,
+        messages_list: list[list[dict]],
+        max_tokens: int = 512,
+        temp: float = 0.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+    ) -> list[dict]:
+        """一次前向服务多条对话（P3 批量解码），返回各自的补全文本与用量。
+
+        不走前缀缓存（批量路径每条独立、fresh KV），适合"一批互不相关的请求"场景；
+        单条低延迟仍走 stream()。数值正确性见 tests/test_batched.py。"""
+        prompts = [self.tok.encode(self.tok.apply_chat_template(m)) for m in messages_list]
+        B = len(prompts)
+        monitor.emit("batch", model=self.model_id, size=B,
+                     prompt_tokens=[len(p) for p in prompts])
+
+        out_ids: list[list[int]] = [[] for _ in range(B)]
+        t0 = time.perf_counter()
+        first_at = None
+        for b, tid in batched_generate(self.model, prompts, max_tokens,
+                                       self.tok.eos_ids, temp, top_p, top_k):
+            if first_at is None:
+                first_at = time.perf_counter()
+            out_ids[b].append(tid)
+
+        elapsed = (time.perf_counter() - first_at) if first_at else 0.0
+        total_out = sum(len(o) for o in out_ids)
+        agg_tok_s = (total_out / elapsed) if elapsed > 0 else 0.0
+        monitor.emit("batch_done", model=self.model_id, size=B,
+                     completion_tokens=total_out, decode_tok_s=round(agg_tok_s, 1))
+        return [
+            {"text": self.tok.decode(out_ids[b]),
+             "prompt_tokens": len(prompts[b]), "completion_tokens": len(out_ids[b])}
+            for b in range(B)
+        ]
 
 
 class VlmEngine:

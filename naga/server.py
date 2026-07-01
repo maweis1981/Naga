@@ -507,6 +507,35 @@ def _count_tokens(engine, messages: list[dict]) -> int:
         return 0
 
 
+@app.post("/batch")
+async def batch(req: Request):
+    """批量补全：一次前向服务多条互不相关的对话，聚合吞吐更高（P3 批量解码）。
+
+    请求体：{"model": ..., "inputs": [[{role,content},...], ...], "max_tokens": ..., ...}
+    返回：{"completions": [{index, message, usage}, ...]}。不注入 RAG/记忆，是低层吞吐端点。"""
+    body = await req.json()
+    inputs = body.get("inputs")
+    if not inputs or not isinstance(inputs, list):
+        return JSONResponse({"error": {"message": "inputs (list of message lists) is required"}},
+                            status_code=400)
+    engine = manager.get(body.get("model"))
+    msgs_list = [_normalize_messages(list(x)) for x in inputs]
+    params = _params(body)
+
+    def job():
+        yield engine.batch_generate(msgs_list, **params)
+
+    results = (await run_in_threadpool(lambda: list(scheduler.submit(job).results())))[0]
+    return {
+        "object": "list", "model": engine.model_id,
+        "completions": [
+            {"index": i, "message": {"role": "assistant", "content": r["text"]},
+             "finish_reason": "stop", "usage": _usage(r["prompt_tokens"], r["completion_tokens"])}
+            for i, r in enumerate(results)
+        ],
+    }
+
+
 @app.post("/v1/embeddings")
 async def embeddings(req: Request):
     """OpenAI 兼容文本嵌入。input 可为单条字符串或字符串数组。"""

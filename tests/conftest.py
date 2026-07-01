@@ -38,6 +38,14 @@ class PlainEngine:
             yield Chunk(delta=d)
         yield Chunk(done=True, prompt_tokens=7, completion_tokens=3)
 
+    def batch_generate(self, messages_list, **kw):
+        # 回显每条输入的最后一段文本，便于断言不串台
+        out = []
+        for m in messages_list:
+            last = str(m[-1].get("content", "")) if m else ""
+            out.append({"text": f"echo:{last}", "prompt_tokens": 5, "completion_tokens": 2})
+        return out
+
 
 class ToolEngine:
     """会调工具：首轮吐一个 add 工具调用，拿到 tool_response 后给最终答案。"""
