@@ -174,30 +174,42 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
         text = ""
         if tool_choice == "required" and step == 0 and tools:
             call = constrained_tool_call(engine, msgs, tools)   # 强制：保证合法调用
+            calls = [call] if _valid_call(call, names) else []
         else:
             looks_tool, buffered, gen = _peek_stream(engine, msgs, params)
             if not looks_tool:                    # 普通回答：直接流式吐出，结束
                 yield from stream_answer(buffered, gen)
                 return
-            # 像工具调用：收全剩余、解析
+            # 像工具调用：收全剩余、解析出**所有**工具调用（单轮可含多个）
             text = "".join(buffered) + "".join(ch.delta for ch in gen if not ch.done)
-            call = parse_tool_call(text)
-            if tool_choice == "auto" and tools and not _valid_call(call, names) \
+            calls = [c for c in parse_tool_calls(text) if _valid_call(c, names)]
+            # auto：像在尝试调用却一个都没解析出合法的 -> 约束解码修复出一个
+            if tool_choice == "auto" and tools and not calls \
                     and _looks_like_tool_attempt(text, names):
-                call = constrained_tool_call(engine, msgs, tools)
-        if not _valid_call(call, names):          # 不是有效工具调用 -> 当最终答案
+                fixed = constrained_tool_call(engine, msgs, tools)
+                if _valid_call(fixed, names):
+                    calls = [fixed]
+        if not calls:                             # 没有有效工具调用 -> 当最终答案
             if text:
                 yield ("delta", text)
             yield ("final", text)
             return
-        yield ("tool_call", call)
-        result = mcp.call(call["name"], call.get("arguments", {}))
-        yield ("tool_result", {"name": call["name"], "result": result})
-        # 回填历史：约束/强制路径下 text 为空，用序列化的调用作为助手发言
-        assistant_text = text or f"<tool_call>{json.dumps(call, ensure_ascii=False)}</tool_call>"
+
+        # 单轮执行**全部**工具调用（并行语义），逐个 emit，再一次性回填历史
+        results = []
+        for call in calls:
+            yield ("tool_call", call)
+            result = mcp.call(call["name"], call.get("arguments", {}))
+            yield ("tool_result", {"name": call["name"], "result": result})
+            results.append((call, result))
+        # 回填：一条 assistant（含所有调用）+ 一条 user（汇总所有工具结果）
+        assistant_text = text or "\n".join(
+            f"<tool_call>{json.dumps(c, ensure_ascii=False)}</tool_call>" for c, _ in results)
+        combined = "\n".join(
+            f"<tool_response name=\"{c['name']}\">{r}</tool_response>" for c, r in results)
         msgs = msgs + [
             {"role": "assistant", "content": assistant_text},
-            {"role": "user", "content": f"<tool_response>{result}</tool_response>\n请根据该结果回答用户的问题。"},
+            {"role": "user", "content": f"{combined}\n请综合以上工具结果回答用户的问题。"},
         ]
     if text:
         yield ("delta", text)

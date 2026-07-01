@@ -63,7 +63,7 @@ class ToolEngine:
 
     def stream(self, messages, **kw):
         joined = " ".join(str(m.get("content", "")) for m in messages)
-        if "<tool_response>" in joined:
+        if "<tool_response" in joined:
             for d in ["答案", "是", "5"]:
                 yield Chunk(delta=d)
         else:
