@@ -266,30 +266,31 @@ def _normalize_messages(messages: list[dict]) -> list[dict]:
 
 
 def _decide_tool_call(engine, messages, specs, tool_choice, params):
-    """判定客户端 tools 是否触发调用；返回 ('tool', call_dict) 或 ('text', 已生成文本)。
+    """判定客户端 tools 是否触发调用；返回 ('tool', [call, ...]) 或 ('text', 已生成文本)。
 
-    tool_choice：'required' 或 {'type':'function','function':{'name':X}} → 强制（约束解码保证合法）；
-    'auto' → 自由生成，若像在尝试调用则用约束解码修复，否则把已生成文本当最终答案返回。"""
+    单轮可产出**多个**工具调用（auto 路径解析全部，对齐 OpenAI tool_calls 数组）。
+    tool_choice：'required' 或 {'type':'function','function':{'name':X}} → 强制单个（约束解码保证合法）；
+    'auto' → 自由生成，解析出所有合法调用；一个都没有但像在尝试时用约束解码补一个。"""
     from .agent import (_looks_like_tool_attempt, _valid_call, build_tool_prompt,
-                        constrained_tool_call, parse_tool_call)
+                        constrained_tool_call, parse_tool_calls)
     names = [s["name"] for s in specs]
     # 把工具清单注入系统提示，模型才有上下文去决定/生成调用（否则约束解码会走空）
     tmsgs = [{"role": "system", "content": build_tool_prompt(specs)}] + messages
     if isinstance(tool_choice, dict):
         want = tool_choice.get("function", {}).get("name")
         forced = [s for s in specs if s["name"] == want] or specs
-        return ("tool", constrained_tool_call(engine, tmsgs, forced))
+        return ("tool", [constrained_tool_call(engine, tmsgs, forced)])
     if tool_choice == "required":
-        return ("tool", constrained_tool_call(engine, tmsgs, specs))
-    # auto：先自由生成
+        return ("tool", [constrained_tool_call(engine, tmsgs, specs)])
+    # auto：先自由生成，解析出所有合法工具调用
     text = "".join(ch.delta for ch in engine.stream(tmsgs, **params) if not ch.done)
-    call = parse_tool_call(text)
-    if _valid_call(call, names):
-        return ("tool", call)
+    calls = [c for c in parse_tool_calls(text) if _valid_call(c, names)]
+    if calls:
+        return ("tool", calls)
     if _looks_like_tool_attempt(text, names):
         fixed = constrained_tool_call(engine, tmsgs, specs)
         if _valid_call(fixed, names):
-            return ("tool", fixed)
+            return ("tool", [fixed])
     return ("text", text)
 
 
@@ -360,15 +361,18 @@ async def chat_completions(req: Request):
 
         kind, data = (await run_in_threadpool(lambda: list(scheduler.submit(decide).results())))[0]
 
-        if kind == "tool" and data and data.get("name"):
-            monitor.emit("tool_call", name=data["name"], arguments=data.get("arguments", {}))
-            tcs = [_tool_call_obj(data)]
-            comp_tokens = len(engine.tok.encode(json.dumps(data, ensure_ascii=False)))
+        calls = [c for c in (data or []) if c and c.get("name")] if kind == "tool" else []
+        if calls:
+            for c in calls:
+                monitor.emit("tool_call", name=c["name"], arguments=c.get("arguments", {}))
+            tcs = [_tool_call_obj(c) for c in calls]   # 单轮可含多个（并行工具调用）
+            comp_tokens = len(engine.tok.encode(json.dumps(calls, ensure_ascii=False)))
             msg = {"role": "assistant", "content": None, "tool_calls": tcs}
             if stream:
                 async def sse_tc():
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
-                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'tool_calls': [{'index': 0, **tcs[0]}]}), ensure_ascii=False)}\n\n"
+                    delta_tcs = [{'index': i, **tc} for i, tc in enumerate(tcs)]
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'tool_calls': delta_tcs}), ensure_ascii=False)}\n\n"
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'tool_calls'))}\n\n"
                     if include_usage:
                         yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, _usage(prompt_tokens, comp_tokens)))}\n\n"
