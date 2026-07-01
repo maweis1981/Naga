@@ -7,25 +7,52 @@
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --user: #2b5cff; --assist: #1e2330;
-    --text: #e6e8ee; --muted: #8b93a7; --line: #262b36;
+    --text: #e6e8ee; --muted: #8b93a7; --line: #262b36; --side: #12141a;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
     font: 15px/1.6 -apple-system, "SF Pro", "PingFang SC", system-ui, sans-serif;
   }
+  /* 整体：左侧栏 + 右主区 */
+  .app { display: flex; height: 100%; }
+  aside {
+    width: 260px; background: var(--side); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  aside .top { padding: 12px; }
+  aside .newbtn {
+    width: 100%; background: var(--user); color: #fff; border: none; border-radius: 9px;
+    padding: 10px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  aside .newbtn:hover { filter: brightness(1.08); }
+  aside .chats { flex: 1; overflow-y: auto; padding: 4px 8px; }
+  .chatitem {
+    padding: 9px 10px; border-radius: 8px; cursor: pointer; display: flex;
+    align-items: center; gap: 8px; color: var(--muted); font-size: 13.5px;
+  }
+  .chatitem:hover { background: #1b1e26; color: var(--text); }
+  .chatitem.active { background: #222736; color: var(--text); }
+  .chatitem .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chatitem .del { opacity: 0; border: none; background: none; color: var(--muted);
+    cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 5px; }
+  .chatitem:hover .del { opacity: 1; }
+  .chatitem .del:hover { color: #ff6b6b; background: #2a1c1c; }
+  aside .foot { padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted);
+    font-size: 12px; display: flex; gap: 14px; }
+  aside .foot a { color: var(--muted); text-decoration: none; }
+  aside .foot a:hover { color: var(--text); }
+  /* 主区 */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   header {
-    padding: 12px 18px; border-bottom: 1px solid var(--line); display: flex;
+    padding: 10px 18px; border-bottom: 1px solid var(--line); display: flex;
     align-items: center; gap: 12px; background: var(--panel);
   }
   header .brand { display: flex; align-items: center; gap: 9px; }
-  header .brand b { font-size: 17px; letter-spacing: .3px; font-weight: 700; }
-  header .logo { display: block; border-radius: 8px; box-shadow: 0 2px 8px rgba(43,92,255,.35); }
+  header .brand b { font-size: 16px; letter-spacing: .3px; font-weight: 700; }
   header .modelsel { background: var(--bg); color: var(--text); border: 1px solid var(--line);
-    border-radius: 7px; padding: 4px 8px; font: inherit; font-size: 13px; max-width: 280px; }
-  header .gear { color: var(--muted); text-decoration: none; font-size: 18px; }
-  header .gear:hover { color: var(--text); }
+    border-radius: 7px; padding: 4px 8px; font: inherit; font-size: 13px; max-width: 240px; }
   header .spacer { flex: 1; }
   header label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
   header input[type=range] { width: 90px; }
@@ -34,6 +61,7 @@
   button.ghost:hover { color: var(--text); }
   #chat { flex: 1; overflow-y: auto; padding: 22px 0; }
   .wrap { max-width: 760px; margin: 0 auto; padding: 0 18px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 18vh; }
   .msg { display: flex; margin: 14px 0; }
   .msg.user { justify-content: flex-end; }
   .bubble { padding: 11px 15px; border-radius: 14px; max-width: 80%; white-space: pre-wrap;
@@ -62,57 +90,164 @@
 </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <svg class="logo" width="28" height="28" viewBox="0 0 32 32" fill="none">
-        <defs>
-          <linearGradient id="ng" x1="0" y1="0" x2="32" y2="32">
-            <stop offset="0" stop-color="#2b6bff"/><stop offset="1" stop-color="#9b3cff"/>
-          </linearGradient>
-        </defs>
-        <rect width="32" height="32" rx="8" fill="url(#ng)"/>
-        <path d="M9.5 22.5 V9.5 L22.5 22.5 V9.5" stroke="#fff" stroke-width="2.6"
-              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        <circle cx="22.5" cy="9.5" r="2" fill="#fff"/>
-      </svg>
-      <b>Naga</b>
-    </div>
-    <select class="modelsel" id="model" title="切换模型"></select>
-    <span class="spacer"></span>
-    <label>温度 <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.7" />
-      <span id="tempv">0.7</span></label>
-    <button class="ghost" id="clear">清空</button>
-    <a class="gear" href="/monitor" title="引擎监视器" style="text-decoration:none">📊</a>
-    <a class="gear" href="/settings" title="模型管理与设置">⚙</a>
-  </header>
+  <div class="app">
+    <!-- 左侧：会话列表 -->
+    <aside>
+      <div class="top"><button class="newbtn" id="new">＋ 新会话</button></div>
+      <div class="chats" id="chats"></div>
+      <div class="foot">
+        <a href="/monitor" title="引擎监视器">📊 监视器</a>
+        <a href="/settings" title="模型管理与设置">⚙ 设置</a>
+      </div>
+    </aside>
 
-  <div id="chat"><div class="wrap" id="list"></div></div>
+    <!-- 右侧：聊天主区 -->
+    <main>
+      <header>
+        <div class="brand">
+          <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+            <defs><linearGradient id="ng" x1="0" y1="0" x2="32" y2="32">
+              <stop offset="0" stop-color="#2b6bff"/><stop offset="1" stop-color="#9b3cff"/>
+            </linearGradient></defs>
+            <rect width="32" height="32" rx="8" fill="url(#ng)"/>
+            <path d="M9.5 22.5 V9.5 L22.5 22.5 V9.5" stroke="#fff" stroke-width="2.6"
+                  stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <circle cx="22.5" cy="9.5" r="2" fill="#fff"/>
+          </svg>
+          <b>Naga</b>
+        </div>
+        <select class="modelsel" id="model" title="切换模型"></select>
+        <span class="spacer"></span>
+        <label>温度 <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.7" />
+          <span id="tempv">0.7</span></label>
+      </header>
 
-  <footer>
-    <div class="preview" id="preview" style="display:none"></div>
-    <div class="composer">
-      <button class="ghost attach" id="attach" title="上传图片">📎</button>
-      <input type="file" id="file" accept="image/*" hidden />
-      <textarea id="input" rows="1" placeholder="说点什么…（📎 传图，Enter 发送，Shift+Enter 换行）"></textarea>
-      <button class="send" id="send">发送</button>
-    </div>
-    <div class="meta" id="meta"></div>
-  </footer>
+      <div id="chat"><div class="wrap" id="list"></div></div>
+
+      <footer>
+        <div class="preview" id="preview" style="display:none"></div>
+        <div class="composer">
+          <button class="ghost attach" id="attach" title="上传图片">📎</button>
+          <input type="file" id="file" accept="image/*" hidden />
+          <textarea id="input" rows="1" placeholder="说点什么…（📎 传图，Enter 发送，Shift+Enter 换行）"></textarea>
+          <button class="send" id="send">发送</button>
+        </div>
+        <div class="meta" id="meta"></div>
+      </footer>
+    </main>
+  </div>
 
 <script>
 const list = document.getElementById('list');
+const chatsEl = document.getElementById('chats');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const meta = document.getElementById('meta');
 const tempEl = document.getElementById('temp');
 const tempv = document.getElementById('tempv');
-let messages = [];      // 完整对话历史，每次都整段发给后端
+let messages = [];       // 当前会话的完整历史（每轮发全量给后端）
+let convId = null;       // 当前会话 id（null = 尚未落盘的空会话）
 let busy = false;
-let pendingImage = null; // 待发送的图片(data URL)
+let pendingImage = null;
 
 tempEl.oninput = () => tempv.textContent = tempEl.value;
 
-// 上传图片：读成 data URL，显示预览
+// ---------- 会话侧边栏 ----------
+async function loadChats() {
+  try {
+    const d = await (await fetch('/api/chats')).json();
+    chatsEl.innerHTML = '';
+    for (const c of d.chats) {
+      const it = document.createElement('div');
+      it.className = 'chatitem' + (c.id === convId ? ' active' : '');
+      const t = document.createElement('div');
+      t.className = 't'; t.textContent = c.title || '新会话';
+      const del = document.createElement('button');
+      del.className = 'del'; del.textContent = '🗑'; del.title = '删除会话';
+      del.onclick = (e) => { e.stopPropagation(); deleteChat(c.id); };
+      it.appendChild(t); it.appendChild(del);
+      it.onclick = () => openChat(c.id);
+      chatsEl.appendChild(it);
+    }
+  } catch (e) {}
+}
+
+async function openChat(id) {
+  if (busy) return;
+  const conv = await (await fetch('/api/chats/' + id)).json();
+  convId = conv.id;
+  messages = conv.messages || [];
+  renderMessages();
+  loadChats();
+}
+
+function newChat() {
+  if (busy) return;
+  convId = null; messages = []; renderMessages(); loadChats();
+  input.focus();
+}
+
+async function deleteChat(id) {
+  await fetch('/api/chats/' + id, { method: 'DELETE' });
+  if (id === convId) newChat();
+  else loadChats();
+}
+
+// 每轮结束后把当前会话整段存回后端；新会话先创建拿 id
+async function persist() {
+  try {
+    if (!convId) {
+      const conv = await (await fetch('/api/chats', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelSel.value }) })).json();
+      convId = conv.id;
+    }
+    await fetch('/api/chats/' + convId, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, model: modelSel.value }) });
+    loadChats();
+  } catch (e) {}
+}
+
+// ---------- 渲染 ----------
+function renderMessages() {
+  list.innerHTML = '';
+  if (!messages.length) {
+    const e = document.createElement('div');
+    e.className = 'empty'; e.textContent = '开始一段新对话吧';
+    list.appendChild(e); meta.textContent = ''; return;
+  }
+  for (const m of messages) {
+    let text = m.content, img = null;
+    if (Array.isArray(m.content)) {
+      img = (m.content.find(c => c.type === 'image_url') || {}).image_url?.url || null;
+      text = m.content.filter(c => c.type === 'text').map(c => c.text).join('');
+    }
+    addBubble(m.role === 'user' ? 'user' : 'assistant', text, img);
+  }
+}
+
+function addBubble(role, text, imageUrl) {
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role;
+  const col = document.createElement('div');
+  const tag = document.createElement('div');
+  tag.className = 'role';
+  tag.textContent = role === 'user' ? '你' : 'Naga';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  if (imageUrl) { const im = document.createElement('img'); im.src = imageUrl; bubble.appendChild(im); }
+  const span = document.createElement('span');
+  span.textContent = text;
+  bubble.appendChild(span);
+  col.appendChild(tag); col.appendChild(bubble); msg.appendChild(col);
+  list.appendChild(msg);
+  scrollDown();
+  return span;
+}
+function scrollDown() { const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight; }
+
+// ---------- 图片上传 ----------
 const fileInput = document.getElementById('file');
 document.getElementById('attach').onclick = () => fileInput.click();
 fileInput.onchange = () => {
@@ -132,7 +267,7 @@ function showPreview() {
   p.appendChild(im); p.appendChild(x);
 }
 
-// 模型下拉：列出本地模型、标注当前、可切换（👁=支持看图）
+// ---------- 模型下拉 ----------
 const modelSel = document.getElementById('model');
 async function loadModels() {
   try {
@@ -154,39 +289,15 @@ modelSel.onchange = async () => {
   modelSel.disabled = false;
   loadModels();
 };
-loadModels();
 
-function addBubble(role, text, imageUrl) {
-  const msg = document.createElement('div');
-  msg.className = 'msg ' + role;
-  const col = document.createElement('div');
-  const tag = document.createElement('div');
-  tag.className = 'role';
-  tag.textContent = role === 'user' ? '你' : 'Naga';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  if (imageUrl) {
-    const im = document.createElement('img');
-    im.src = imageUrl;
-    bubble.appendChild(im);
-  }
-  const span = document.createElement('span');
-  span.textContent = text;
-  bubble.appendChild(span);
-  col.appendChild(tag); col.appendChild(bubble); msg.appendChild(col);
-  list.appendChild(msg);
-  scrollDown();
-  return span;   // 流式时只更新文本部分，不动图片
-}
-function scrollDown() { const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight; }
-
+// ---------- 发送 ----------
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 input.addEventListener('input', () => {
   input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px';
 });
-document.getElementById('clear').onclick = () => { messages = []; list.innerHTML = ''; meta.textContent = ''; };
+document.getElementById('new').onclick = newChat;
 sendBtn.onclick = send;
 
 async function send() {
@@ -194,9 +305,9 @@ async function send() {
   if ((!text && !pendingImage) || busy) return;
   busy = true; sendBtn.disabled = true;
   input.value = ''; input.style.height = 'auto';
+  if (list.querySelector('.empty')) list.innerHTML = '';
 
   const img = pendingImage;
-  // 带图时按 OpenAI 多模态格式：content 是 [图, 文] 数组
   const content = img
     ? [{ type: 'image_url', image_url: { url: img } }, { type: 'text', text }]
     : text;
@@ -216,15 +327,12 @@ async function send() {
       body: JSON.stringify({
         model: modelSel.value || 'naga', stream: true,
         temperature: parseFloat(tempEl.value),
-        // 历史消息里的图片只保留最后一条，其余压成纯文本
         messages: messages.map((m, i) =>
           (Array.isArray(m.content) && i !== messages.length - 1)
             ? { role: m.role, content: m.content.filter(c => c.type === 'text').map(c => c.text).join('') }
             : m),
       }),
     });
-
-    // 逐块读取 SSE 流：按 \n\n 切分事件，解析 data: 后的 JSON
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -251,7 +359,16 @@ async function send() {
   const dt = (performance.now() - t0) / 1000;
   meta.textContent = `${acc.length} 字 · ${dt.toFixed(1)}s`;
   busy = false; sendBtn.disabled = false; input.focus();
+  persist();               // 落盘当前会话（含刚完成的这轮）
 }
+
+// ---------- 启动：加载模型 + 会话列表，打开最近一个会话 ----------
+(async function init() {
+  await loadModels();
+  const d = await (await fetch('/api/chats')).json().catch(() => ({ chats: [] }));
+  if (d.chats && d.chats.length) openChat(d.chats[0].id);
+  else renderMessages();
+})();
 </script>
 </body>
 </html>

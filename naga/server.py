@@ -44,9 +44,11 @@ ADMIN_TOKEN: str | None = None
 WEBUI = Path(__file__).parent / "webui"
 _SENTINEL = object()   # run_in_threadpool(next, it, _SENTINEL) 的迭代结束标记
 
+from .conversations import ConversationStore
 from .optimize import MetricsHistory
 
 metrics_hist = MetricsHistory(Path.home() / ".naga" / "metrics.jsonl")
+conversations = ConversationStore()      # 多会话持久化（聊天记录落盘）
 
 
 def _cors_origins() -> tuple[list[str], str]:
@@ -589,6 +591,69 @@ async def embeddings(req: Request):
         "model": body.get("model") or emb.model_id,
         "usage": {"prompt_tokens": 0, "total_tokens": 0},
     }
+
+
+# ---------- 会话管理（多会话持久化，供聊天前端用）----------
+
+@app.get("/api/chats")
+def chats_list():
+    """会话摘要列表（不含完整消息），按最近更新倒序。"""
+    return {"chats": conversations.list()}
+
+
+@app.post("/api/chats")
+async def chats_create(req: Request):
+    body = await req.json() if await req.body() else {}
+    conv = conversations.create(title=body.get("title"), model=body.get("model"))
+    return conv
+
+
+def _bad_id():
+    return JSONResponse({"error": "invalid id"}, status_code=400)
+
+
+@app.get("/api/chats/{cid}")
+def chats_get(cid: str):
+    try:
+        conv = conversations.get(cid)
+    except ValueError:
+        return _bad_id()
+    if conv is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return conv
+
+
+@app.put("/api/chats/{cid}")
+async def chats_save(cid: str, req: Request):
+    """整段保存某会话（前端每轮结束后回存完整 messages）。"""
+    body = await req.json()
+    try:
+        conv = conversations.save(cid, body.get("messages", []),
+                                  title=body.get("title"), model=body.get("model"))
+    except ValueError:
+        return _bad_id()
+    if conv is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return conv
+
+
+@app.patch("/api/chats/{cid}")
+async def chats_rename(cid: str, req: Request):
+    try:
+        conv = conversations.rename(cid, (await req.json()).get("title", ""))
+    except ValueError:
+        return _bad_id()
+    if conv is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return conv
+
+
+@app.delete("/api/chats/{cid}")
+def chats_delete(cid: str):
+    try:
+        return {"ok": conversations.delete(cid)}
+    except ValueError:
+        return _bad_id()
 
 
 # ---------- 管理 ----------
