@@ -67,10 +67,26 @@ def causal_mask(seq_len: int, offset: int) -> mx.array:
     return mx.where(k_idx <= q_idx, 0.0, -1e9).astype(mx.float32)
 
 
+def precompute_rope_positions(positions: mx.array, head_dim: int, theta: float):
+    """按「每序列各自的位置」算 cos/sin —— 批量解码时各序列长度不同、位置不同。
+
+    positions: [B, L] 的整型位置张量。返回 cos/sin，形状 [B, L, head_dim]。
+    """
+    pos = positions.astype(mx.float32)                                       # [B, L]
+    inv_freq = 1.0 / (theta ** (mx.arange(0, head_dim, 2, dtype=mx.float32) / head_dim))
+    freqs = pos[..., None] * inv_freq[None, None, :]                         # [B, L, D/2]
+    emb = mx.concatenate([freqs, freqs], axis=-1)                           # [B, L, D]
+    return mx.cos(emb), mx.sin(emb)
+
+
 def apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
-    # x: [B, H, L, D]；cos/sin: [L, D]。NeoX 风格的 rotate_half。
-    cos = cos[None, None, :, :]
-    sin = sin[None, None, :, :]
+    # x: [B, H, L, D]。cos/sin 为 [L, D]（全批共享位置）或 [B, L, D]（每序列不同位置）。
+    if cos.ndim == 2:
+        cos = cos[None, None, :, :]        # [1, 1, L, D]，与旧行为逐位一致
+        sin = sin[None, None, :, :]
+    else:
+        cos = cos[:, None, :, :]           # [B, 1, L, D]，在头维上广播
+        sin = sin[:, None, :, :]
     d = x.shape[-1]
     x1, x2 = x[..., : d // 2], x[..., d // 2 :]
     rotated = mx.concatenate([-x2, x1], axis=-1)
@@ -187,7 +203,8 @@ class Qwen2Model(nn.Module):
         self.layers = [DecoderLayer(args) for _ in range(args.num_hidden_layers)]
         self.norm = RMSNorm(args.hidden_size, args.rms_norm_eps)
 
-    def __call__(self, input_ids=None, caches=None, inputs_embeds=None) -> mx.array:
+    def __call__(self, input_ids=None, caches=None, inputs_embeds=None,
+                 positions=None, mask=None) -> mx.array:
         # 多模态时直接传入已拼好视觉向量的 embeds，跳过词嵌入查表
         h = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         B, L = h.shape[0], h.shape[1]
@@ -195,9 +212,14 @@ class Qwen2Model(nn.Module):
         # 有缓存时，新 token 的全局起点 = 已缓存长度
         offset = caches[0].offset if caches is not None else 0
 
-        cos, sin = precompute_rope(L, self.args.head_dim, self.args.rope_theta, offset)
+        # positions/mask 显式给出时走「批量、每序列不同位置」路径；否则维持原单序列行为
+        if positions is None:
+            cos, sin = precompute_rope(L, self.args.head_dim, self.args.rope_theta, offset)
+        else:
+            cos, sin = precompute_rope_positions(positions, self.args.head_dim, self.args.rope_theta)
         cos, sin = cos.astype(h.dtype), sin.astype(h.dtype)
-        mask = causal_mask(L, offset)
+        if mask is None:
+            mask = causal_mask(L, offset)
 
         for i, layer in enumerate(self.layers):
             h = layer(h, cos, sin, mask, caches[i] if caches is not None else None)
@@ -218,8 +240,9 @@ class Model(nn.Module):
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
-    def __call__(self, input_ids=None, caches=None, inputs_embeds=None) -> mx.array:
-        h = self.model(input_ids, caches, inputs_embeds)
+    def __call__(self, input_ids=None, caches=None, inputs_embeds=None,
+                 positions=None, mask=None) -> mx.array:
+        h = self.model(input_ids, caches, inputs_embeds, positions, mask)
         if self.args.tie_word_embeddings:
             # 复用词嵌入矩阵做输出投影：h @ embed.weight.T
             return self.model.embed_tokens.as_linear(h)

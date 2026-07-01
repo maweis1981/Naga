@@ -124,17 +124,23 @@ def _ban(logits: mx.array, idx: int) -> mx.array:
     return mx.where(mx.arange(n) == idx, mx.array(-1e9, logits.dtype), logits)
 
 
-def _constrained_pick(logits, gen_ids, committed, decode, constraint, eos_ids):
+def _constrained_pick(logits, gen_ids, committed, decode, constraint, eos_ids, max_tries=256):
     """在约束下选一个 token：从 logit 最高开始试，第一个"文本增量全程合法"的即选中。
 
     非法 token 当场屏蔽再取下一个——这就是约束解码的本质：把违反语法的 token
     从采样分布里抹掉，模型只能在合法 token 中挑。选中即让约束机沿其字符前进。
+
+    max_tries 要足够大：模型强烈想说自然语言（如被强制调用无关工具）时，合法的起始
+    token（如 `{`）可能排在很靠后的位次，budget 太小会误判"无合法 token"而中途停摆。
     """
     work = logits
-    for _ in range(64):                       # 最多试 64 个候选，足够避开非法 token
+    for _ in range(max_tries):
         idx = int(mx.argmax(work).item())
         if idx in eos_ids:
-            return idx if constraint.complete() else None  # 只有已合法收尾才允许停
+            if constraint.complete():
+                return idx                    # 已合法收尾，允许停
+            work = _ban(work, idx)            # 约束未完成时 EOS 非法：屏蔽后继续找合法 token
+            continue
         delta = decode(gen_ids + [idx])[len(committed):]
         if not delta:                         # 零宽 token，跳过以防死循环
             work = _ban(work, idx); continue
@@ -182,6 +188,66 @@ def generate_constrained(
         tokens = mx.array([[idx]])
         if constraint.complete():             # 合法 JSON 已闭合，到此为止
             break
+
+
+_NEG = -1e9
+
+
+def batched_generate(
+    model,
+    prompts: list[list[int]],
+    max_tokens: int = 256,
+    eos_ids: tuple[int, ...] = (),
+    temp: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 0,
+) -> Iterator[tuple[int, int]]:
+    """把多条 prompt 打成一个 batch、同批前向、逐 token 并行解码（P3 静态批处理核心）。
+
+    各 prompt 长度可不同：**左侧填充**对齐到同长，配合「每序列各自的位置（RoPE）+ 屏蔽
+    每序列的左填充列」，保证批内每条序列的数值与它单独生成时逐位一致（左填充位被 mask 成
+    ~0 权重、不参与注意力；填充位的 KV 只落在自己那一行、不污染别的序列）。
+
+    产出 (seq_idx, token_id)：某序列采到 eos 即停（后续仍在 batch 里空转但输出被忽略，
+    直到全部完成或达到 max_tokens）。这是"多序列同批前向"，把 GPU 一次前向摊到 B 条序列上。
+    """
+    B = len(prompts)
+    lens = [len(p) for p in prompts]
+    Lp = max(lens)
+    pad = [Lp - n for n in lens]                                  # 每条左填充多少
+
+    tokens = mx.array([[0] * pad[b] + list(prompts[b]) for b in range(B)])          # [B, Lp]
+    positions = mx.array([[max(0, j - pad[b]) for j in range(Lp)] for b in range(B)])  # [B, Lp]
+    # 预填充掩码 [B,1,Lp,Lp]：因果(j<=i) 且 key 非填充(j>=pad_b) 才可见
+    prefill_mask = mx.array([
+        [[0.0 if (j <= i and j >= pad[b]) else _NEG for j in range(Lp)] for i in range(Lp)]
+        for b in range(B)
+    ])[:, None]
+
+    caches = model.make_caches()
+    logits = model(tokens, caches, positions=positions, mask=prefill_mask)[:, -1, :]  # [B, V]
+
+    done = [False] * B
+    for t in range(max_tokens):
+        nxt = [_sample(logits[b], temp, top_p, top_k) for b in range(B)]
+        for b in range(B):
+            if done[b]:
+                continue
+            if nxt[b] in eos_ids:
+                done[b] = True
+            else:
+                yield (b, nxt[b])
+        if all(done):
+            return
+
+        total = Lp + t + 1                                       # 本步 key 总长
+        step_tokens = mx.array([[nxt[b] if not done[b] else 0] for b in range(B)])       # [B,1]
+        step_pos = mx.array([[(Lp - pad[b]) + t] for b in range(B)])                     # [B,1]
+        # 解码掩码 [B,1,1,total]：新 token 看得到全部真实历史，只屏蔽各自的左填充列
+        step_mask = mx.array([
+            [[0.0 if j >= pad[b] else _NEG for j in range(total)]] for b in range(B)
+        ])[:, None]
+        logits = model(step_tokens, caches, positions=step_pos, mask=step_mask)[:, -1, :]
 
 
 def generate_vlm(

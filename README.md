@@ -11,11 +11,14 @@ It is built for developers who want a lightweight, hackable engine to run, serve
 - **Hand-written multimodal inference** — Qwen2/Qwen2.5 text models and LLaVA-style vision models (self-written SigLIP ViT + projector), with a KV-cached two-phase (prefill/decode) generation loop.
 - **Weight quantization (INT4 / INT8)** — self-written `QuantizedLinear` + `QuantizedEmbedding` on `mx.quantized_matmul`. ~1.8× faster decode, ~3× lower memory.
 - **RadixAttention prefix caching** — a radix tree that reuses KV across requests; flat per-turn latency for multi-turn chat, RAG, and agent loops.
+- **Batched decoding** — multiple sequences (of different lengths, via left-padding + per-sequence RoPE positions and pad-masking) decoded in one batched forward for ~1.6× aggregate throughput at B=6, exposed via `POST /batch` (`{"inputs": [[{role,content}...], ...]}` → per-input completions). Numerically exact vs serial in fp32 (see `tests/test_batched.py`); A/B in `scratch_batch.py`.
 - **Constrained decoding** — a self-written JSON grammar automaton that guarantees valid, schema-correct tool calls even from tiny models.
-- **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, plus a self-built single-page WebUI.
+- **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, standard function calling (pass `tools` → get structured `tool_calls` back, honoring `tool_choice: auto | required | {function}` via constrained decoding), context-length guard (clean `context_length_exceeded` 400 like OpenAI), plus a self-built single-page WebUI.
 - **Local memory + RAG** — hand-written BERT embeddings, semantic retrieval, and document (txt/md/pdf) chunking & retrieval.
-- **MCP agent** — stdio MCP client with a tool-calling loop (`tool_choice: auto | required | none`).
+- **MCP agent** — MCP client over **stdio** (local subprocess, with per-call timeouts so a stalled server can't hang a request) **or Streamable HTTP** (remote/hosted servers, JSON or SSE responses), plus a tool-calling loop (`tool_choice: auto | required | none`). Config in `~/.naga/mcp.json`: `{"mcpServers": {"local": {"command": "python3", "args": [...]}, "remote": {"url": "https://host/mcp", "headers": {"Authorization": "Bearer ..."}}}}`.
+- **Agent SDK** — an importable `Agent` class + `@tool` decorator (`naga.sdk`) that turns plain Python functions into tools (JSON schema auto-derived from type hints) and runs the constrained tool-calling loop locally, composable with MCP servers. See `examples/agent_sdk_demo.py`.
 - **Live monitor dashboard** — `/monitor` streams every inference (prefill/decode tok/s, prefix-cache reuse, tool calls) plus a hardware panel (CPU per-core, unified memory, MLX VRAM, and — with `naga.powermon` — GPU utilization/power/thermal).
+- **Self-observability, tracking & optimization** — the same event stream is rolled up into optimization-grade metrics: `GET /metrics` (JSON: decode tok/s p50/p95, TTFT distribution, prefix-cache reuse ratio, per-model throughput, queue depth, tool frequency), `GET /metrics/prometheus` (Prometheus exposition for Grafana/OpenTelemetry), `GET /metrics/advice` (an **optimization advisor** that reads the live profile and suggests concrete tuning — quantize, cut context, check prefix stability, etc.), `GET /metrics/history` (persisted throughput/latency/cache trends that survive restarts, for A/B-ing configs), plus a `GET /health` probe for Open WebUI and orchestrators.
 - **Benchmark & profiling tools** — reproducible A/B harnesses for quantization, attention, prefix caching, and constrained decoding.
 
 ## Requirements
@@ -48,6 +51,47 @@ If you prefer not to install as a package yet, the minimum runtime dependencies 
 ```bash
 .venv/bin/pip install -U mlx tokenizers huggingface_hub numpy pillow fastapi uvicorn psutil pypdf
 ```
+
+## Development & Tests
+
+Install dev extras and run the suite (no model download or GPU needed — it uses stub
+engines, a fake stdio MCP server, and FastAPI's TestClient):
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest -q
+```
+
+The tests cover the self-observability aggregation (`/metrics` + Prometheus), the
+OpenAI-compatible server (streaming `usage`, `/v1/models`, `/health`), the Agent SDK
+(`@tool` schema derivation + tool-calling loop), and the MCP client's call/timeout paths.
+
+## Benchmarking
+
+`bench/benchmark_serving.py` is a standard LLM-serving benchmark (metrics aligned with
+vLLM's `benchmark_serving` / LLMPerf): **TTFT** (time to first token), **TPOT** (time per
+output token), **ITL** (inter-token latency), **E2E** latency, and request/output token
+throughput — each reported as mean / median / p99. It drives the OpenAI streaming API
+(`stream_options.include_usage` for exact token counts) and is stdlib-only.
+
+```bash
+naga serve --model Qwen/Qwen2.5-0.5B-Instruct           # in one terminal
+# for a pure-inference measurement, turn off RAG/memory/MCP context injection:
+curl -s localhost:8000/admin/settings -H 'Content-Type: application/json' \
+  -d '{"rag_enabled":false,"memory_enabled":false,"mcp_enabled":false}'
+python bench/benchmark_serving.py --url http://127.0.0.1:8000 \
+  --model Qwen/Qwen2.5-0.5B-Instruct --num-prompts 24 --concurrency 8 --max-tokens 128
+```
+
+Example (Qwen2.5-0.5B bf16, M-series): at concurrency 1, TTFT ≈ 14 ms, TPOT ≈ 8 ms
+(~120 tok/s decode). Because the scheduler is single-worker serial, raising concurrency
+keeps aggregate output throughput flat (~115 tok/s) while TTFT grows with queue depth —
+the case the batched-decode path (`POST /batch`) is built to improve.
+
+Add `--batch` to also drive `/batch` (server-side batched forward) and print a serial-vs-batch
+A/B. Measured (16 prompts, 64 tokens each): serial streaming ~117 tok/s vs `/batch` (B=16)
+**~536 tok/s = 4.6× aggregate throughput** — the batched forward amortizes each weight read
+across the whole batch (decode is memory-bandwidth-bound), so the win grows with batch size.
 
 ## Quick Start
 
@@ -85,6 +129,30 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"naga","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
+**Connecting [Open WebUI](https://github.com/open-webui/open-webui):**
+
+Naga is a drop-in OpenAI backend. In Open WebUI: **Settings → Connections → OpenAI API**,
+set the base URL to `http://localhost:8000/v1` and any non-empty API key. Or run it in Docker
+already pointed at Naga:
+
+```bash
+docker run -d --name open-webui -p 3000:8080 \
+  -v open-webui:/app/backend/data \
+  --add-host host.docker.internal:host-gateway \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e OPENAI_API_KEY=naga \
+  -e ENABLE_OLLAMA_API=False \
+  ghcr.io/open-webui/open-webui:main
+```
+
+> ⚠️ **Docker networking gotcha (the #1 reason the model list is empty):** from *inside* the
+> container, `localhost` is the container itself — **not** your Mac. Use
+> `http://host.docker.internal:8000/v1`, never `http://localhost:8000/v1`. Also note Open WebUI's
+> **PersistentConfig**: the `OPENAI_API_BASE_URL` env is only written to its DB on the *first*
+> start of a fresh data volume — if you reuse an old volume, fix the URL in the UI
+> (Settings → Connections) instead, since the env is ignored. And if you bind Naga to a
+> non-loopback host so a container can reach it, set `NAGA_ADMIN_TOKEN` (see Security Notes).
+
 **Unified CLI** (talks to the running server):
 
 ```bash
@@ -105,7 +173,9 @@ naga-serve  # OpenAI-compatible server + WebUI
 naga-vlm    # direct multimodal CLI
 ```
 
-Runtime data (settings, memory, documents, MCP servers) lives under `~/.naga/`.
+Runtime data (settings, memory, documents, MCP servers, last-active model) lives under `~/.naga/`.
+Naga remembers the model you last switched to: start `naga serve` with no `--model` and it
+restores your last active model (falling back to a built-in default on first run).
 
 ## Security Notes
 
@@ -140,7 +210,7 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P0** | Engine core: Transformer forward + single-shot CLI | ✅ |
 | **P1** | KV-cache + sampling (temperature / top-p) + streaming | ✅ |
 | **P2** | OpenAI-compatible HTTP API (`/v1/chat/completions` + SSE) | ✅ |
-| **P3** | Concurrent scheduling / continuous batching | ⬜ |
+| **P3** | Concurrent scheduling (serial scheduler ✅; batched decode ✅ — 1.6× throughput at B=6; mid-flight continuous admission ⬜) | 🚧 |
 | **P4** | Multimodal vision (self-written SigLIP ViT + projector) | ✅ |
 | **P5** | WebUI (self-built single-page streaming chat) | ✅ |
 | **P6** | Model management (scan / hot-swap / download) + settings | ✅ |
@@ -152,6 +222,9 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P12** | Fused attention fast path (optional `--fast-attn`) | ✅ |
 | **P13** | RadixAttention prefix KV cache | ✅ |
 | **P14** | Constrained decoding (JSON grammar + tool-call constraint) | ✅ |
+| **P15** | Self-observability: rolled-up metrics (`/metrics` JSON + Prometheus) + `/health` | ✅ |
+| **P19** | Optimization advisor (`/metrics/advice`) + persisted metric history (`/metrics/history`) | ✅ |
+| **P16** | Agent SDK (`naga.sdk`: `Agent` + `@tool`, local functions + MCP) | ✅ |
 
 ```
 naga/

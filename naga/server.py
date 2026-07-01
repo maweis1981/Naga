@@ -32,13 +32,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from starlette.concurrency import run_in_threadpool
+
 from .monitor import monitor
+from .scheduler import scheduler
 
 app = FastAPI(title="Naga")
 manager: ModelManager | None = None
 ADMIN_TOKEN: str | None = None
 
 WEBUI = Path(__file__).parent / "webui"
+_SENTINEL = object()   # run_in_threadpool(next, it, _SENTINEL) 的迭代结束标记
+
+from .optimize import MetricsHistory
+
+metrics_hist = MetricsHistory(Path.home() / ".naga" / "metrics.jsonl")
 
 
 def _cors_origins() -> tuple[list[str], str]:
@@ -124,6 +132,50 @@ def monitor_hw():
     return {"static": hwstats.static(), "sample": hwstats.sample(), "power": hwstats.power()}
 
 
+@app.get("/health")
+def health():
+    """健康探针：供 Open WebUI / 反向代理 / 编排器判断服务是否就绪。"""
+    active = manager.active if manager else None
+    return {"status": "ok", "service": "naga", "active_model": active}
+
+
+@app.get("/metrics")
+def metrics():
+    """自观测指标（JSON）：decode tok/s 分位、TTFT 分布、前缀缓存复用率、各模型吞吐、工具频次。
+
+    这是 Naga 的「自跟踪—自优化」闭环对外的结构化出口：每次推理都在更新这份画像，
+    据此可判断量化 / 前缀缓存 / 换模型是否真的带来收益。"""
+    snap = monitor.stats.snapshot()
+    if manager is not None:                       # 叠加一帧硬件采样，便于关联吞吐与功耗/显存
+        try:
+            from . import hwstats
+            snap["hardware"] = {"sample": hwstats.sample(), "power": hwstats.power()}
+        except Exception:
+            pass
+    return snap
+
+
+@app.get("/metrics/prometheus")
+def metrics_prometheus():
+    """Prometheus 文本曝光格式：可直接被 Prometheus / Grafana / OpenTelemetry Collector 抓取。"""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(monitor.stats.prometheus(),
+                             media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.get("/metrics/advice")
+def metrics_advice():
+    """优化顾问：基于当前指标画像给出可执行的调优建议（自跟踪—自优化闭环的"优化"环）。"""
+    from .optimize import advise
+    return {"advice": advise(monitor.stats.snapshot())}
+
+
+@app.get("/metrics/history")
+def metrics_history(n: int = 200):
+    """指标历史趋势（重启后仍在）：decode/TTFT/前缀复用随时间的变化，便于对比配置收益。"""
+    return {"history": metrics_hist.recent(n)}
+
+
 @app.get("/monitor/stream")
 async def monitor_stream():
     """SSE 实时事件流：新事件一产生就推给页面。"""
@@ -151,8 +203,9 @@ async def monitor_stream():
 @app.get("/v1/models")
 def list_models():
     st = manager.state()
+    created = int(time.time())
     data = [{
-        "id": m["id"], "object": "model", "created": 0, "owned_by": "naga",
+        "id": m["id"], "object": "model", "created": created, "owned_by": "naga",
         "type": m["type"], "size_gb": m["size_gb"],
         "active": m["id"] == st["active"], "loaded": m["id"] in st["loaded"],
     } for m in st["available"]]
@@ -179,6 +232,72 @@ def _params(body: dict) -> dict:
         top_p=float(body.get("top_p", s["top_p"])),
         top_k=int(body.get("top_k", 0)),
     )
+
+
+def _openai_tools_to_specs(tools: list[dict]) -> list[dict]:
+    """OpenAI `tools`（[{type:function, function:{name,description,parameters}}]）→ 内部工具规格。"""
+    specs = []
+    for t in tools or []:
+        fn = t.get("function") if t.get("type") == "function" else t
+        if fn and fn.get("name"):
+            specs.append({"name": fn["name"], "description": fn.get("description", ""),
+                          "schema": fn.get("parameters", {})})
+    return specs
+
+
+def _normalize_messages(messages: list[dict]) -> list[dict]:
+    """把 OpenAI 的 assistant.tool_calls / tool 角色 / content=None 规整成模板能渲染的字符串。
+
+    多模态的数组型 content 原样透传（给 VLM 用）。"""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):                 # 多模态图文数组，原样保留
+            out.append(m)
+            continue
+        if content is None and m.get("tool_calls"):
+            content = "\n".join(
+                f"<tool_call>{json.dumps(tc.get('function', tc), ensure_ascii=False)}</tool_call>"
+                for tc in m["tool_calls"])
+        elif m.get("role") == "tool":                 # 客户端回传的工具结果
+            content = f"<tool_response>{content}</tool_response>"
+        out.append({**m, "content": content if content is not None else ""})
+    return out
+
+
+def _decide_tool_call(engine, messages, specs, tool_choice, params):
+    """判定客户端 tools 是否触发调用；返回 ('tool', call_dict) 或 ('text', 已生成文本)。
+
+    tool_choice：'required' 或 {'type':'function','function':{'name':X}} → 强制（约束解码保证合法）；
+    'auto' → 自由生成，若像在尝试调用则用约束解码修复，否则把已生成文本当最终答案返回。"""
+    from .agent import (_looks_like_tool_attempt, _valid_call, build_tool_prompt,
+                        constrained_tool_call, parse_tool_call)
+    names = [s["name"] for s in specs]
+    # 把工具清单注入系统提示，模型才有上下文去决定/生成调用（否则约束解码会走空）
+    tmsgs = [{"role": "system", "content": build_tool_prompt(specs)}] + messages
+    if isinstance(tool_choice, dict):
+        want = tool_choice.get("function", {}).get("name")
+        forced = [s for s in specs if s["name"] == want] or specs
+        return ("tool", constrained_tool_call(engine, tmsgs, forced))
+    if tool_choice == "required":
+        return ("tool", constrained_tool_call(engine, tmsgs, specs))
+    # auto：先自由生成
+    text = "".join(ch.delta for ch in engine.stream(tmsgs, **params) if not ch.done)
+    call = parse_tool_call(text)
+    if _valid_call(call, names):
+        return ("tool", call)
+    if _looks_like_tool_attempt(text, names):
+        fixed = constrained_tool_call(engine, tmsgs, specs)
+        if _valid_call(fixed, names):
+            return ("tool", fixed)
+    return ("text", text)
+
+
+def _tool_call_obj(call: dict) -> dict:
+    """内部 call → OpenAI tool_calls 元素（arguments 是 JSON 字符串）。"""
+    return {"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+            "function": {"name": call.get("name", ""),
+                         "arguments": json.dumps(call.get("arguments", {}), ensure_ascii=False)}}
 
 
 @app.post("/v1/chat/completions")
@@ -215,19 +334,85 @@ async def chat_completions(req: Request):
     if sp and not any(m.get("role") == "system" for m in messages):
         messages = [{"role": "system", "content": sp}] + messages
 
+    messages = _normalize_messages(messages)     # 规整 tool_calls / tool 角色 / None content
     engine = manager.get(body.get("model"))     # 按 model 字段路由 / 回退到活跃模型
     model_name = engine.model_id
+
+    # 上下文长度保护：prompt + 预留输出不得超过模型窗口，否则返回标准 OpenAI 错误
+    ctx_err = _context_length_error(engine, messages, body)
+    if ctx_err is not None:
+        return ctx_err
+
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     stream = bool(body.get("stream", False))
+    # OpenAI 语义：stream_options.include_usage=true 时，在 [DONE] 前补发一帧 usage
+    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+
+    # OpenAI 标准函数调用：请求带 tools 时，返回结构化 tool_calls 交给客户端执行（区别于内部 MCP agent）
+    tool_choice = body.get("tool_choice", "auto")
+    client_specs = _openai_tools_to_specs(body.get("tools", []))
+    if client_specs and tool_choice != "none":
+        prompt_tokens = _count_tokens(engine, messages)
+
+        def decide():
+            yield _decide_tool_call(engine, messages, client_specs, tool_choice, _params(body))
+
+        kind, data = (await run_in_threadpool(lambda: list(scheduler.submit(decide).results())))[0]
+
+        if kind == "tool" and data and data.get("name"):
+            monitor.emit("tool_call", name=data["name"], arguments=data.get("arguments", {}))
+            tcs = [_tool_call_obj(data)]
+            comp_tokens = len(engine.tok.encode(json.dumps(data, ensure_ascii=False)))
+            msg = {"role": "assistant", "content": None, "tool_calls": tcs}
+            if stream:
+                async def sse_tc():
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'tool_calls': [{'index': 0, **tcs[0]}]}), ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'tool_calls'))}\n\n"
+                    if include_usage:
+                        yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, _usage(prompt_tokens, comp_tokens)))}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(sse_tc(), media_type="text/event-stream")
+            return JSONResponse({
+                "id": cid, "object": "chat.completion", "created": created, "model": model_name,
+                "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}],
+                "usage": _usage(prompt_tokens, comp_tokens),
+            })
+
+        # 未触发工具（auto 且模型直接作答）：把已生成文本当普通回答返回
+        text = data if kind == "text" else ""
+        comp_tokens = len(engine.tok.encode(text)) if text else 0
+        if stream:
+            async def sse_txt():
+                yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+                if text:
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'content': text}), ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
+                if include_usage:
+                    yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, _usage(prompt_tokens, comp_tokens)))}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(sse_txt(), media_type="text/event-stream")
+        return JSONResponse({
+            "id": cid, "object": "chat.completion", "created": created, "model": model_name,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                         "finish_reason": "stop"}],
+            "usage": _usage(prompt_tokens, comp_tokens),
+        })
 
     # MCP 工具调用：开启且有可用工具时，走 Agent 循环
     if manager.settings.get("mcp_enabled") and manager.mcp.tools():
         from .agent import run_agent
 
+        prompt_tokens = _count_tokens(engine, messages)
+
         def pieces():
+            # 逐 token 转发 delta（普通回答/工具后作答都有打字机效果）；tool_call/tool_result
+            # 转成可读标记；final 跳过（内容已由 delta 流出，避免重复）。
             for kind, data in run_agent(engine, manager.mcp, messages, **_params(body)):
-                if kind == "tool_call":
+                if kind == "delta":
+                    yield data
+                elif kind == "tool_call":
                     monitor.emit("tool_call", name=data["name"],
                                  arguments=data.get("arguments", {}))
                     yield f"\n🔧 调用 `{data['name']}`（{json.dumps(data.get('arguments', {}), ensure_ascii=False)}）\n"
@@ -235,46 +420,68 @@ async def chat_completions(req: Request):
                     monitor.emit("tool_result", name=data["name"],
                                  result=str(data["result"])[:300])
                     yield f"↩ {data['result']}\n\n"
-                else:
-                    yield data
+                # kind == "final": 已由 delta 流出，忽略
 
         if stream:
-            def sse_tool():
+            async def sse_tool():
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
-                for p in pieces():
+                collected: list[str] = []
+                job = scheduler.submit(pieces)             # 串行化整段 Agent 循环
+                it = job.results()
+                while True:
+                    p = await run_in_threadpool(next, it, _SENTINEL)
+                    if p is _SENTINEL:
+                        break
+                    collected.append(p)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {'content': p}), ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
+                if include_usage:
+                    completion_tokens = len(engine.tok.encode("".join(collected)))
+                    usage = _usage(prompt_tokens, completion_tokens)
+                    yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, usage))}\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(sse_tool(), media_type="text/event-stream")
 
-        text = "".join(pieces())
+        text = "".join(await run_in_threadpool(lambda: list(scheduler.submit(pieces).results())))
+        completion_tokens = len(engine.tok.encode(text)) if text else 0
         return JSONResponse({
             "id": cid, "object": "chat.completion", "created": created, "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": _usage(prompt_tokens, completion_tokens),
         })
 
     if stream:
-        def sse():
+        async def sse():
             yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
-            for ch in engine.stream(messages, **_params(body)):
+            usage = _usage(0, 0)
+            job = scheduler.submit(lambda: engine.stream(messages, **_params(body)))
+            it = job.results()
+            while True:                                    # 串行化生成，避免并发污染 KV/前缀缓存
+                ch = await run_in_threadpool(next, it, _SENTINEL)
+                if ch is _SENTINEL:
+                    break
                 if ch.done:
+                    usage = _usage(ch.prompt_tokens, ch.completion_tokens)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
                 else:
                     obj = _chunk(cid, created, model_name, {"content": ch.delta})
                     yield f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+            if include_usage:
+                yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, usage))}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(sse(), media_type="text/event-stream")
 
-    text = ""
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    for ch in engine.stream(messages, **_params(body)):
-        if ch.done:
-            usage = {"prompt_tokens": ch.prompt_tokens, "completion_tokens": ch.completion_tokens,
-                     "total_tokens": ch.prompt_tokens + ch.completion_tokens}
-        else:
-            text += ch.delta
+    def _collect():
+        text_, usage_ = "", _usage(0, 0)
+        for ch in scheduler.submit(lambda: engine.stream(messages, **_params(body))).results():
+            if ch.done:
+                usage_ = _usage(ch.prompt_tokens, ch.completion_tokens)
+            else:
+                text_ += ch.delta
+        return text_, usage_
+
+    text, usage = await run_in_threadpool(_collect)
     return JSONResponse({
         "id": cid, "object": "chat.completion", "created": created, "model": model_name,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
@@ -286,6 +493,78 @@ async def chat_completions(req: Request):
 def _chunk(cid, created, model, delta, finish=None):
     return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def _usage(prompt_tokens: int, completion_tokens: int) -> dict:
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens}
+
+
+def _usage_chunk(cid, created, model, usage):
+    """OpenAI 流式用量帧：choices 为空、只带 usage，紧跟在 stop 之后、[DONE] 之前。
+
+    Open WebUI 等前端在 stream_options.include_usage=true 时依赖这一帧做 token 计量。"""
+    return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [], "usage": usage}
+
+
+def _count_tokens(engine, messages: list[dict]) -> int:
+    """估算一组 messages 套上对话模板后的 token 数（工具调用路径补 usage 用）。"""
+    try:
+        return len(engine.tok.encode(engine.tok.apply_chat_template(messages)))
+    except Exception:
+        return 0
+
+
+def _context_length_error(engine, messages: list[dict], body: dict):
+    """prompt + 预留输出超过模型上下文窗口时，返回标准 OpenAI 400 错误；否则 None。
+
+    对标 OpenAI 的 context_length_exceeded：与其让底层产出乱码/晦涩错误，不如明确拒绝。"""
+    max_ctx = getattr(getattr(engine, "args", None), "max_position_embeddings", 0)
+    if not max_ctx:
+        return None
+    prompt_tokens = _count_tokens(engine, messages)
+    want_out = int(body.get("max_tokens") or 0)
+    if prompt_tokens + want_out > max_ctx:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": (f"This model's maximum context length is {max_ctx} tokens. "
+                        f"However, your messages resulted in {prompt_tokens} tokens"
+                        + (f" and you requested {want_out} completion tokens" if want_out else "")
+                        + ". Please shorten the conversation."),
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "param": "messages",
+        }})
+    return None
+
+
+@app.post("/batch")
+async def batch(req: Request):
+    """批量补全：一次前向服务多条互不相关的对话，聚合吞吐更高（P3 批量解码）。
+
+    请求体：{"model": ..., "inputs": [[{role,content},...], ...], "max_tokens": ..., ...}
+    返回：{"completions": [{index, message, usage}, ...]}。不注入 RAG/记忆，是低层吞吐端点。"""
+    body = await req.json()
+    inputs = body.get("inputs")
+    if not inputs or not isinstance(inputs, list):
+        return JSONResponse({"error": {"message": "inputs (list of message lists) is required"}},
+                            status_code=400)
+    engine = manager.get(body.get("model"))
+    msgs_list = [_normalize_messages(list(x)) for x in inputs]
+    params = _params(body)
+
+    def job():
+        yield engine.batch_generate(msgs_list, **params)
+
+    results = (await run_in_threadpool(lambda: list(scheduler.submit(job).results())))[0]
+    return {
+        "object": "list", "model": engine.model_id,
+        "completions": [
+            {"index": i, "message": {"role": "assistant", "content": r["text"]},
+             "finish_reason": "stop", "usage": _usage(r["prompt_tokens"], r["completion_tokens"])}
+            for i, r in enumerate(results)
+        ],
+    }
 
 
 @app.post("/v1/embeddings")
@@ -408,7 +687,10 @@ def mcp_state(req: Request):
 async def mcp_add(req: Request):
     _require_admin(req)
     b = await req.json()
-    err = manager.mcp.add_server(b["name"], b["command"], b.get("args", []), b.get("env"))
+    if b.get("url"):                              # HTTP 传输：连远程/托管 MCP 服务器
+        err = manager.mcp.add_http_server(b["name"], b["url"], b.get("headers"))
+    else:                                         # stdio 传输：本地子进程
+        err = manager.mcp.add_server(b["name"], b["command"], b.get("args", []), b.get("env"))
     return {"ok": err is None, "error": err}
 
 
@@ -430,10 +712,13 @@ async def admin_settings(req: Request):
     return {"ok": True, "settings": manager.settings}
 
 
+DEFAULT_MODEL = "llava-hf/llava-interleave-qwen-0.5b-hf"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Naga 服务")
-    ap.add_argument("--model", default="llava-hf/llava-interleave-qwen-0.5b-hf",
-                    help="启动时加载的默认模型（多模态模型可同时处理文本和图片）")
+    ap.add_argument("--model", default=None,
+                    help="启动时加载的模型；不指定则恢复上次用的模型，再退回内置默认")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--admin-token", default=None,
@@ -444,15 +729,42 @@ def main():
 
     global ADMIN_TOKEN, manager
     ADMIN_TOKEN = args.admin_token or os.environ.get("NAGA_ADMIN_TOKEN")
+    mgr_mod = _manager_module()
+    # 模型选择优先级：命令行显式 > 上次活跃（持久化）> 内置默认
+    model = args.model or mgr_mod.load_last_model() or DEFAULT_MODEL
+    restored = (not args.model) and model != DEFAULT_MODEL
     q = "（Q%d 量化）" % args.bits if args.quantize else ""
-    print(f"⏳ 启动，默认加载 {args.model}{q} ...", flush=True)
-    manager = _manager_module().ModelManager(
-        default_model=args.model, quantize=args.quantize, bits=args.bits
+    print(f"⏳ 启动，加载 {model}{q}{'（恢复上次）' if restored else ''} ...", flush=True)
+    manager = mgr_mod.ModelManager(
+        default_model=model, quantize=args.quantize, bits=args.bits
     )
     print(f"✓ 就绪 http://{args.host}:{args.port}   设置页 /settings", flush=True)
 
+    _start_metrics_snapshotter()
+
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+def _start_metrics_snapshotter(interval_s: int = 60):
+    """后台线程：定期把指标快照落盘成历史趋势（仅在有生成活动时写，避免刷空数据）。"""
+    import threading
+    import time as _time
+
+    def loop():
+        last_gen = -1
+        while True:
+            _time.sleep(interval_s)
+            snap = monitor.stats.snapshot()
+            gens = snap["totals"]["generations"]
+            if gens != last_gen:                      # 只在有新生成时记录一帧
+                last_gen = gens
+                try:
+                    metrics_hist.append(snap, _time.time())
+                except Exception:
+                    pass
+
+    threading.Thread(target=loop, daemon=True, name="naga-metrics").start()
 
 
 if __name__ == "__main__":
