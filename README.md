@@ -83,10 +83,15 @@ python bench/benchmark_serving.py --url http://127.0.0.1:8000 \
   --model Qwen/Qwen2.5-0.5B-Instruct --num-prompts 24 --concurrency 8 --max-tokens 128
 ```
 
-Example (Qwen2.5-0.5B bf16, M-series): at concurrency 1, TTFT ≈ 18 ms, TPOT ≈ 8.5 ms
-(~117 tok/s decode). Because the scheduler is single-worker serial, raising concurrency
+Example (Qwen2.5-0.5B bf16, M-series): at concurrency 1, TTFT ≈ 14 ms, TPOT ≈ 8 ms
+(~120 tok/s decode). Because the scheduler is single-worker serial, raising concurrency
 keeps aggregate output throughput flat (~115 tok/s) while TTFT grows with queue depth —
 the case the batched-decode path (`POST /batch`) is built to improve.
+
+Add `--batch` to also drive `/batch` (server-side batched forward) and print a serial-vs-batch
+A/B. Measured (16 prompts, 64 tokens each): serial streaming ~117 tok/s vs `/batch` (B=16)
+**~536 tok/s = 4.6× aggregate throughput** — the batched forward amortizes each weight read
+across the whole batch (decode is memory-bandwidth-bound), so the win grows with batch size.
 
 ## Quick Start
 

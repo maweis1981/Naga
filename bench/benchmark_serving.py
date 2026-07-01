@@ -162,6 +162,29 @@ def report(results, bench_dur, concurrency, max_tokens):
         print(f"  示例错误: {failed[0].error}")
 
 
+def batch_request(url, model, prompts, max_tokens, temperature):
+    """一次 /batch 调用（非流式，服务端批量前向）。返回 (完成列表, 墙钟耗时)。"""
+    body = json.dumps({
+        "model": model,
+        "inputs": [[{"role": "user", "content": p}] for p in prompts],
+        "max_tokens": max_tokens, "temperature": temperature,
+    }).encode()
+    req = urllib.request.Request(url + "/batch", data=body,
+                                 headers={"Content-Type": "application/json"})
+    t0 = time.perf_counter()
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        obj = json.load(resp)
+    return obj.get("completions", []), time.perf_counter() - t0
+
+
+def run_batch_bench(url, model, num_prompts, max_tokens, temperature):
+    tasks = [PROMPTS[i % len(PROMPTS)] for i in range(num_prompts)]
+    comps, dur = batch_request(url, model, tasks, max_tokens, temperature)
+    out = sum(c.get("usage", {}).get("completion_tokens", 0) for c in comps)
+    inp = sum(c.get("usage", {}).get("prompt_tokens", 0) for c in comps)
+    return len(comps), inp, out, dur
+
+
 def main():
     ap = argparse.ArgumentParser(description="Naga LLM serving benchmark")
     ap.add_argument("--url", default="http://127.0.0.1:8000")
@@ -171,6 +194,8 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--batch", action="store_true",
+                    help="额外跑一遍 /batch（服务端批量前向），与串行对比聚合吞吐")
     args = ap.parse_args()
 
     for _ in range(args.warmup):                       # 预热：排除首次加载/JIT
@@ -179,6 +204,22 @@ def main():
     results, dur = run_benchmark(args.url, args.model, args.num_prompts,
                                  args.concurrency, args.max_tokens, args.temperature)
     report(results, dur, args.concurrency, args.max_tokens)
+
+    if args.batch:
+        n, inp, out, bdur = run_batch_bench(args.url, args.model, args.num_prompts,
+                                            args.max_tokens, args.temperature)
+        serial_out = sum(r.output_tokens for r in results if r.ok)
+        serial_tps = serial_out / dur if dur else 0
+        batch_tps = out / bdur if bdur else 0
+        print("\n" + "=" * 62)
+        print("  串行 (streaming) vs 批量 (/batch) 聚合输出吞吐")
+        print("=" * 62)
+        print(f"  {'方式':<24}{'输出tok':>10}{'耗时(s)':>10}{'tok/s':>12}")
+        print(f"  {'串行 conc=' + str(args.concurrency):<24}{serial_out:>10}{dur:>10.2f}{serial_tps:>12.1f}")
+        print(f"  {'批量 /batch(B=' + str(n) + ')':<24}{out:>10}{bdur:>10.2f}{batch_tps:>12.1f}")
+        if serial_tps > 0:
+            print(f"\n  批量聚合吞吐提升: {batch_tps/serial_tps:.2f}×")
+        print("=" * 62)
 
 
 if __name__ == "__main__":
