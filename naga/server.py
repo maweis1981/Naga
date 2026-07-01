@@ -110,6 +110,14 @@ def index():
     return HTMLResponse((WEBUI / "index.html").read_text(encoding="utf-8"))
 
 
+@app.get("/naga-render.js")
+def render_js():
+    """自研消息渲染器（Markdown/表格/LaTeX/工具折叠，零第三方库）。"""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse((WEBUI / "naga-render.js").read_text(encoding="utf-8"),
+                             media_type="application/javascript")
+
+
 @app.get("/settings")
 def settings_page():
     return HTMLResponse((WEBUI / "settings.html").read_text(encoding="utf-8"))
