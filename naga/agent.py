@@ -31,27 +31,64 @@ def build_tool_prompt(tools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def parse_tool_call(text: str):
-    # 优先匹配 <tool_call>{...}</tool_call> 标签
-    m = TOOL_RE.search(text)
-    if m:
+def _looks_call(obj) -> bool:
+    return isinstance(obj, dict) and "name" in obj
+
+
+def parse_tool_calls(text: str) -> list[dict]:
+    """从模型输出里解析出**所有**工具调用（支持单轮并行多工具，对齐 OpenAI tool_calls 数组）。
+
+    容错解析三种形态：
+      1) 多个 <tool_call>{...}</tool_call> 标签；
+      2) 顶层 JSON 数组 [{...}, {...}]；
+      3) 裸拼接的多个对象 {...}{...} —— 用 raw_decode 从每个 '{' 起点逐个抽取，
+         跳过重叠（已消费区间），既拿全又不重复。
+    去重（按 name+arguments），保持出现顺序。
+    """
+    calls: list[dict] = []
+
+    # 1) 所有 <tool_call> 标签
+    for m in TOOL_RE.finditer(text):
         try:
             obj = json.loads(m.group(1))
-            if isinstance(obj, dict) and "name" in obj:
-                return obj
         except json.JSONDecodeError:
-            pass
-    # 容错：模型常常不加标签、直接吐 JSON —— 扫描第一个含 name/arguments 的对象
+            continue
+        if _looks_call(obj):
+            calls.append(obj)
+
+    # 2/3) 扫描裸 JSON：对象要求含 name+arguments；数组则展开其中的调用
     dec = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch == "{":
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "{[":
             try:
-                obj, _ = dec.raw_decode(text[i:])
+                obj, end = dec.raw_decode(text[i:])
             except json.JSONDecodeError:
+                i += 1
                 continue
             if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-                return obj
-    return None
+                calls.append(obj)
+            elif isinstance(obj, list):
+                calls.extend(o for o in obj if isinstance(o, dict) and "name" in o and "arguments" in o)
+            i += end                      # 跳过整个已解析的 JSON，避免重复/嵌套误抓
+            continue
+        i += 1
+
+    # 去重（保持顺序）
+    seen, out = set(), []
+    for c in calls:
+        key = (c.get("name"), json.dumps(c.get("arguments", {}), sort_keys=True, ensure_ascii=False))
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def parse_tool_call(text: str):
+    """向后兼容：返回第一个工具调用（单工具老路径仍用它）。"""
+    calls = parse_tool_calls(text)
+    return calls[0] if calls else None
 
 
 def constrained_tool_call(engine, messages, tools, max_tokens: int = 128):
