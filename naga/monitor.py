@@ -58,10 +58,13 @@ class Stats:
             "requests": 0, "generations": 0, "prompt_tokens": 0,
             "completion_tokens": 0, "tool_calls": 0, "tool_errors": 0,
             "rag_injections": 0, "memory_injections": 0, "model_loads": 0,
+            "queued": 0,
         }
         self._decode: deque = deque(maxlen=self.WINDOW)   # decode tok/s 样本
         self._ttft: deque = deque(maxlen=self.WINDOW)     # ttft_ms 样本
         self._reuse: deque = deque(maxlen=self.WINDOW)    # 前缀缓存复用率样本
+        self._queue_wait: deque = deque(maxlen=self.WINDOW)  # 排队等待时延样本(ms)
+        self._max_queue_depth = 0
         self._prefix_matched = 0
         self._prefix_total = 0
         self.tools: dict[str, int] = {}                   # 工具名 -> 调用次数
@@ -106,6 +109,10 @@ class Stats:
                 self.totals["memory_injections"] += ev.get("memories", 0)
             elif kind == "model_load":
                 self.totals["model_loads"] += 1
+            elif kind == "schedule":
+                self.totals["queued"] += 1
+                self._queue_wait.append(ev.get("wait_ms", 0.0))
+                self._max_queue_depth = max(self._max_queue_depth, ev.get("queue_depth", 0))
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -121,6 +128,11 @@ class Stats:
                     "total_tokens": self._prefix_total,
                     "saved_prefill_tokens": self._prefix_matched,  # 命中即省掉的 prefill 量
                     "reuse_recent": _summary(self._reuse),
+                },
+                "scheduler": {
+                    "queued": self.totals["queued"],
+                    "max_queue_depth": self._max_queue_depth,
+                    "wait_ms": _summary(self._queue_wait),
                 },
                 "tools": dict(sorted(self.tools.items(), key=lambda kv: -kv[1])),
                 "models": {
@@ -172,6 +184,14 @@ class Stats:
         out.append("# HELP naga_prefix_cache_reuse_ratio Fraction of prompt tokens served from prefix cache.")
         out.append("# TYPE naga_prefix_cache_reuse_ratio gauge")
         line("naga_prefix_cache_reuse_ratio", snap["prefix_cache"]["reuse_avg"])
+
+        out.append("# HELP naga_queue_wait_milliseconds Time requests waited for the engine (sliding window).")
+        out.append("# TYPE naga_queue_wait_milliseconds gauge")
+        for q in ("avg", "p50", "p95"):
+            line("naga_queue_wait_milliseconds", snap["scheduler"]["wait_ms"][q], f'quantile="{q}"')
+        out.append("# HELP naga_max_queue_depth Peak number of requests queued for the engine.")
+        out.append("# TYPE naga_max_queue_depth gauge")
+        line("naga_max_queue_depth", snap["scheduler"]["max_queue_depth"])
 
         out.append("# HELP naga_model_decode_tokens_per_second Per-model decode throughput (avg).")
         out.append("# TYPE naga_model_decode_tokens_per_second gauge")

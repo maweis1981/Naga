@@ -156,7 +156,7 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P0** | Engine core: Transformer forward + single-shot CLI | ✅ |
 | **P1** | KV-cache + sampling (temperature / top-p) + streaming | ✅ |
 | **P2** | OpenAI-compatible HTTP API (`/v1/chat/completions` + SSE) | ✅ |
-| **P3** | Concurrent scheduling / continuous batching | ⬜ |
+| **P3** | Concurrent scheduling (single-worker serial scheduler ✅; token-level continuous batching ⬜) | 🚧 |
 | **P4** | Multimodal vision (self-written SigLIP ViT + projector) | ✅ |
 | **P5** | WebUI (self-built single-page streaming chat) | ✅ |
 | **P6** | Model management (scan / hot-swap / download) + settings | ✅ |

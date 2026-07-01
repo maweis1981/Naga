@@ -32,13 +32,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from starlette.concurrency import run_in_threadpool
+
 from .monitor import monitor
+from .scheduler import scheduler
 
 app = FastAPI(title="Naga")
 manager: ModelManager | None = None
 ADMIN_TOKEN: str | None = None
 
 WEBUI = Path(__file__).parent / "webui"
+_SENTINEL = object()   # run_in_threadpool(next, it, _SENTINEL) 的迭代结束标记
 
 
 def _cors_origins() -> tuple[list[str], str]:
@@ -275,10 +279,15 @@ async def chat_completions(req: Request):
                     yield data
 
         if stream:
-            def sse_tool():
+            async def sse_tool():
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
                 collected: list[str] = []
-                for p in pieces():
+                job = scheduler.submit(pieces)             # 串行化整段 Agent 循环
+                it = job.results()
+                while True:
+                    p = await run_in_threadpool(next, it, _SENTINEL)
+                    if p is _SENTINEL:
+                        break
                     collected.append(p)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {'content': p}), ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
@@ -289,7 +298,7 @@ async def chat_completions(req: Request):
                 yield "data: [DONE]\n\n"
             return StreamingResponse(sse_tool(), media_type="text/event-stream")
 
-        text = "".join(pieces())
+        text = "".join(await run_in_threadpool(lambda: list(scheduler.submit(pieces).results())))
         completion_tokens = len(engine.tok.encode(text)) if text else 0
         return JSONResponse({
             "id": cid, "object": "chat.completion", "created": created, "model": model_name,
@@ -299,10 +308,15 @@ async def chat_completions(req: Request):
         })
 
     if stream:
-        def sse():
+        async def sse():
             yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
             usage = _usage(0, 0)
-            for ch in engine.stream(messages, **_params(body)):
+            job = scheduler.submit(lambda: engine.stream(messages, **_params(body)))
+            it = job.results()
+            while True:                                    # 串行化生成，避免并发污染 KV/前缀缓存
+                ch = await run_in_threadpool(next, it, _SENTINEL)
+                if ch is _SENTINEL:
+                    break
                 if ch.done:
                     usage = _usage(ch.prompt_tokens, ch.completion_tokens)
                     yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
@@ -314,13 +328,16 @@ async def chat_completions(req: Request):
             yield "data: [DONE]\n\n"
         return StreamingResponse(sse(), media_type="text/event-stream")
 
-    text = ""
-    usage = _usage(0, 0)
-    for ch in engine.stream(messages, **_params(body)):
-        if ch.done:
-            usage = _usage(ch.prompt_tokens, ch.completion_tokens)
-        else:
-            text += ch.delta
+    def _collect():
+        text_, usage_ = "", _usage(0, 0)
+        for ch in scheduler.submit(lambda: engine.stream(messages, **_params(body))).results():
+            if ch.done:
+                usage_ = _usage(ch.prompt_tokens, ch.completion_tokens)
+            else:
+                text_ += ch.delta
+        return text_, usage_
+
+    text, usage = await run_in_threadpool(_collect)
     return JSONResponse({
         "id": cid, "object": "chat.completion", "created": created, "model": model_name,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
