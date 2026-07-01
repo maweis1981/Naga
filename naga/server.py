@@ -217,6 +217,72 @@ def _params(body: dict) -> dict:
     )
 
 
+def _openai_tools_to_specs(tools: list[dict]) -> list[dict]:
+    """OpenAI `tools`（[{type:function, function:{name,description,parameters}}]）→ 内部工具规格。"""
+    specs = []
+    for t in tools or []:
+        fn = t.get("function") if t.get("type") == "function" else t
+        if fn and fn.get("name"):
+            specs.append({"name": fn["name"], "description": fn.get("description", ""),
+                          "schema": fn.get("parameters", {})})
+    return specs
+
+
+def _normalize_messages(messages: list[dict]) -> list[dict]:
+    """把 OpenAI 的 assistant.tool_calls / tool 角色 / content=None 规整成模板能渲染的字符串。
+
+    多模态的数组型 content 原样透传（给 VLM 用）。"""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):                 # 多模态图文数组，原样保留
+            out.append(m)
+            continue
+        if content is None and m.get("tool_calls"):
+            content = "\n".join(
+                f"<tool_call>{json.dumps(tc.get('function', tc), ensure_ascii=False)}</tool_call>"
+                for tc in m["tool_calls"])
+        elif m.get("role") == "tool":                 # 客户端回传的工具结果
+            content = f"<tool_response>{content}</tool_response>"
+        out.append({**m, "content": content if content is not None else ""})
+    return out
+
+
+def _decide_tool_call(engine, messages, specs, tool_choice, params):
+    """判定客户端 tools 是否触发调用；返回 ('tool', call_dict) 或 ('text', 已生成文本)。
+
+    tool_choice：'required' 或 {'type':'function','function':{'name':X}} → 强制（约束解码保证合法）；
+    'auto' → 自由生成，若像在尝试调用则用约束解码修复，否则把已生成文本当最终答案返回。"""
+    from .agent import (_looks_like_tool_attempt, _valid_call, build_tool_prompt,
+                        constrained_tool_call, parse_tool_call)
+    names = [s["name"] for s in specs]
+    # 把工具清单注入系统提示，模型才有上下文去决定/生成调用（否则约束解码会走空）
+    tmsgs = [{"role": "system", "content": build_tool_prompt(specs)}] + messages
+    if isinstance(tool_choice, dict):
+        want = tool_choice.get("function", {}).get("name")
+        forced = [s for s in specs if s["name"] == want] or specs
+        return ("tool", constrained_tool_call(engine, tmsgs, forced))
+    if tool_choice == "required":
+        return ("tool", constrained_tool_call(engine, tmsgs, specs))
+    # auto：先自由生成
+    text = "".join(ch.delta for ch in engine.stream(tmsgs, **params) if not ch.done)
+    call = parse_tool_call(text)
+    if _valid_call(call, names):
+        return ("tool", call)
+    if _looks_like_tool_attempt(text, names):
+        fixed = constrained_tool_call(engine, tmsgs, specs)
+        if _valid_call(fixed, names):
+            return ("tool", fixed)
+    return ("text", text)
+
+
+def _tool_call_obj(call: dict) -> dict:
+    """内部 call → OpenAI tool_calls 元素（arguments 是 JSON 字符串）。"""
+    return {"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+            "function": {"name": call.get("name", ""),
+                         "arguments": json.dumps(call.get("arguments", {}), ensure_ascii=False)}}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: Request):
     body = await req.json()
@@ -251,6 +317,7 @@ async def chat_completions(req: Request):
     if sp and not any(m.get("role") == "system" for m in messages):
         messages = [{"role": "system", "content": sp}] + messages
 
+    messages = _normalize_messages(messages)     # 规整 tool_calls / tool 角色 / None content
     engine = manager.get(body.get("model"))     # 按 model 字段路由 / 回退到活跃模型
     model_name = engine.model_id
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -258,6 +325,57 @@ async def chat_completions(req: Request):
     stream = bool(body.get("stream", False))
     # OpenAI 语义：stream_options.include_usage=true 时，在 [DONE] 前补发一帧 usage
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+
+    # OpenAI 标准函数调用：请求带 tools 时，返回结构化 tool_calls 交给客户端执行（区别于内部 MCP agent）
+    tool_choice = body.get("tool_choice", "auto")
+    client_specs = _openai_tools_to_specs(body.get("tools", []))
+    if client_specs and tool_choice != "none":
+        prompt_tokens = _count_tokens(engine, messages)
+
+        def decide():
+            yield _decide_tool_call(engine, messages, client_specs, tool_choice, _params(body))
+
+        kind, data = (await run_in_threadpool(lambda: list(scheduler.submit(decide).results())))[0]
+
+        if kind == "tool" and data and data.get("name"):
+            monitor.emit("tool_call", name=data["name"], arguments=data.get("arguments", {}))
+            tcs = [_tool_call_obj(data)]
+            comp_tokens = len(engine.tok.encode(json.dumps(data, ensure_ascii=False)))
+            msg = {"role": "assistant", "content": None, "tool_calls": tcs}
+            if stream:
+                async def sse_tc():
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'tool_calls': [{'index': 0, **tcs[0]}]}), ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'tool_calls'))}\n\n"
+                    if include_usage:
+                        yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, _usage(prompt_tokens, comp_tokens)))}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(sse_tc(), media_type="text/event-stream")
+            return JSONResponse({
+                "id": cid, "object": "chat.completion", "created": created, "model": model_name,
+                "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}],
+                "usage": _usage(prompt_tokens, comp_tokens),
+            })
+
+        # 未触发工具（auto 且模型直接作答）：把已生成文本当普通回答返回
+        text = data if kind == "text" else ""
+        comp_tokens = len(engine.tok.encode(text)) if text else 0
+        if stream:
+            async def sse_txt():
+                yield f"data: {json.dumps(_chunk(cid, created, model_name, {'role': 'assistant'}))}\n\n"
+                if text:
+                    yield f"data: {json.dumps(_chunk(cid, created, model_name, {'content': text}), ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(_chunk(cid, created, model_name, {}, 'stop'))}\n\n"
+                if include_usage:
+                    yield f"data: {json.dumps(_usage_chunk(cid, created, model_name, _usage(prompt_tokens, comp_tokens)))}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(sse_txt(), media_type="text/event-stream")
+        return JSONResponse({
+            "id": cid, "object": "chat.completion", "created": created, "model": model_name,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                         "finish_reason": "stop"}],
+            "usage": _usage(prompt_tokens, comp_tokens),
+        })
 
     # MCP 工具调用：开启且有可用工具时，走 Agent 循环
     if manager.settings.get("mcp_enabled") and manager.mcp.tools():

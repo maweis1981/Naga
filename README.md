@@ -12,7 +12,7 @@ It is built for developers who want a lightweight, hackable engine to run, serve
 - **Weight quantization (INT4 / INT8)** — self-written `QuantizedLinear` + `QuantizedEmbedding` on `mx.quantized_matmul`. ~1.8× faster decode, ~3× lower memory.
 - **RadixAttention prefix caching** — a radix tree that reuses KV across requests; flat per-turn latency for multi-turn chat, RAG, and agent loops.
 - **Constrained decoding** — a self-written JSON grammar automaton that guarantees valid, schema-correct tool calls even from tiny models.
-- **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, plus a self-built single-page WebUI.
+- **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, standard function calling (pass `tools` → get structured `tool_calls` back, honoring `tool_choice: auto | required | {function}` via constrained decoding), plus a self-built single-page WebUI.
 - **Local memory + RAG** — hand-written BERT embeddings, semantic retrieval, and document (txt/md/pdf) chunking & retrieval.
 - **MCP agent** — stdio MCP client (with per-call timeouts so a stalled server can't hang a request) and a tool-calling loop (`tool_choice: auto | required | none`).
 - **Agent SDK** — an importable `Agent` class + `@tool` decorator (`naga.sdk`) that turns plain Python functions into tools (JSON schema auto-derived from type hints) and runs the constrained tool-calling loop locally, composable with MCP servers. See `examples/agent_sdk_demo.py`.

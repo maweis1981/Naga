@@ -114,6 +114,16 @@ def client(plain_engine):
 
 
 @pytest.fixture
+def tool_client(tool_engine):
+    """引擎会吐 add 工具调用的 TestClient（测 OpenAI tools/tool_calls 路径）。"""
+    from fastapi.testclient import TestClient
+
+    from naga import server
+    server.manager = FakeManager(tool_engine)
+    return TestClient(server.app)
+
+
+@pytest.fixture
 def fake_mcp_server(tmp_path):
     """写一个最小 stdio MCP 服务器脚本，返回 (python, [script_path])。"""
     script = tmp_path / "fake_mcp.py"

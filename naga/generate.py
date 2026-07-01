@@ -124,17 +124,23 @@ def _ban(logits: mx.array, idx: int) -> mx.array:
     return mx.where(mx.arange(n) == idx, mx.array(-1e9, logits.dtype), logits)
 
 
-def _constrained_pick(logits, gen_ids, committed, decode, constraint, eos_ids):
+def _constrained_pick(logits, gen_ids, committed, decode, constraint, eos_ids, max_tries=256):
     """在约束下选一个 token：从 logit 最高开始试，第一个"文本增量全程合法"的即选中。
 
     非法 token 当场屏蔽再取下一个——这就是约束解码的本质：把违反语法的 token
     从采样分布里抹掉，模型只能在合法 token 中挑。选中即让约束机沿其字符前进。
+
+    max_tries 要足够大：模型强烈想说自然语言（如被强制调用无关工具）时，合法的起始
+    token（如 `{`）可能排在很靠后的位次，budget 太小会误判"无合法 token"而中途停摆。
     """
     work = logits
-    for _ in range(64):                       # 最多试 64 个候选，足够避开非法 token
+    for _ in range(max_tries):
         idx = int(mx.argmax(work).item())
         if idx in eos_ids:
-            return idx if constraint.complete() else None  # 只有已合法收尾才允许停
+            if constraint.complete():
+                return idx                    # 已合法收尾，允许停
+            work = _ban(work, idx)            # 约束未完成时 EOS 非法：屏蔽后继续找合法 token
+            continue
         delta = decode(gen_ids + [idx])[len(committed):]
         if not delta:                         # 零宽 token，跳过以防死循环
             work = _ban(work, idx); continue
