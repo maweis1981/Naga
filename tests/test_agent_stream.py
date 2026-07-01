@@ -55,7 +55,7 @@ class ToolThenAnswerEng:
 
     def stream(self, msgs, **kw):
         joined = " ".join(str(m.get("content", "")) for m in msgs)
-        if "<tool_response>" in joined:
+        if "<tool_response" in joined:
             for w in ["Result ", "is ", "42"]:
                 yield Chunk(delta=w)
         else:
@@ -72,3 +72,40 @@ def test_tool_call_then_streamed_answer():
     assert kinds.count("delta") >= 2                 # 工具后的作答也逐 token
     final = events[-1]
     assert final[0] == "final" and "42" in final[1]
+
+
+class MultiToolEng:
+    """单轮吐两个不同工具调用，拿到结果后作答。"""
+    model_id = "t"
+    tok = PlainEng._Tok()
+
+    def stream(self, msgs, **kw):
+        joined = " ".join(str(m.get("content", "")) for m in msgs)
+        if "<tool_response" in joined:
+            for w in ["Done ", "both"]:
+                yield Chunk(delta=w)
+        else:
+            yield Chunk(delta='{"name":"current_time","arguments":{}}'
+                              '{"name":"add","arguments":{"a":1,"b":2}}')
+        yield Chunk(done=True)
+
+
+class _MultiMCP:
+    def tools(self):
+        return [{"name": "current_time", "description": "", "schema": {}},
+                {"name": "add", "description": "", "schema": {}}]
+
+    def call(self, name, args):
+        return "NOW" if name == "current_time" else "3"
+
+
+def test_multiple_tool_calls_in_one_turn():
+    events = list(run_agent(MultiToolEng(), _MultiMCP(),
+                            [{"role": "user", "content": "time and 1+2"}]))
+    tool_calls = [d for k, d in events if k == "tool_call"]
+    tool_results = [d for k, d in events if k == "tool_result"]
+    # 单轮里两个不同工具都被调用并执行
+    assert [c["name"] for c in tool_calls] == ["current_time", "add"]
+    assert {r["result"] for r in tool_results} == {"NOW", "3"}
+    assert events[-1][0] == "final"
+    assert "both" in events[-1][1]

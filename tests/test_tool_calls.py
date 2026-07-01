@@ -104,3 +104,41 @@ def test_native_function_call_roundtrip_final_answer(tool_client):
     assert choice["finish_reason"] == "stop"                 # 收尾，不再调工具
     assert not choice["message"].get("tool_calls")
     assert "5" in (choice["message"].get("content") or "")   # grounded 于工具结果
+
+
+def test_native_returns_multiple_tool_calls(monkeypatch):
+    """单轮解析出多个工具调用时，tool_calls 数组应含全部（并行工具调用）。"""
+    from fastapi.testclient import TestClient
+
+    from naga import server
+    from naga.engine import Chunk
+    from tests.conftest import FakeManager, FakeTok
+
+    class MultiEngine:
+        model_id = "naga-test"
+        tok = FakeTok()
+
+        class _Args:
+            max_position_embeddings = 32768
+        args = _Args()
+
+        def stream(self, messages, **kw):
+            yield Chunk(delta='{"name":"add","arguments":{"a":1,"b":2}}'
+                              '{"name":"get_weather","arguments":{"city":"Paris"}}')
+            yield Chunk(done=True)
+
+    server.manager = FakeManager(MultiEngine())
+    client = TestClient(server.app)
+    r = client.post("/v1/chat/completions", json={
+        "model": "naga-test",
+        "messages": [{"role": "user", "content": "add 1+2 and weather in Paris"}],
+        "tools": [ADD_TOOL, {"type": "function", "function": {
+            "name": "get_weather", "description": "weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+        "tool_choice": "auto",
+    })
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    tcs = choice["message"]["tool_calls"]
+    assert [tc["function"]["name"] for tc in tcs] == ["add", "get_weather"]
+    assert all(tc["id"] for tc in tcs) and len({tc["id"] for tc in tcs}) == 2   # 各自唯一 id
