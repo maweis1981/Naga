@@ -113,9 +113,10 @@ class AgentResult:
     text: str                                   # 最终自然语言回答
     steps: list[dict] = field(default_factory=list)   # 工具调用/结果轨迹
     messages: list[dict] = field(default_factory=list)  # 含最终回答的消息历史
+    usage: dict = field(default_factory=dict)   # 用量：tool_calls/denied/steps/completion_tokens
 
     def __repr__(self) -> str:
-        return f"AgentResult(text={self.text!r}, steps={len(self.steps)})"
+        return f"AgentResult(text={self.text!r}, steps={len(self.steps)}, usage={self.usage})"
 
 
 class Agent:
@@ -135,7 +136,13 @@ class Agent:
     def __init__(self, model: str | None = None, *, engine: Any = None,
                  tools: list[Callable] | None = None, mcp: Any = None,
                  system: str | None = None, max_steps: int = 5,
-                 tool_choice: str = "auto", quantize: bool = False, bits: int = 4,
+                 tool_choice: str = "auto",
+                 allowed_tools: list[str] | None = None,
+                 blocked_tools: list[str] | None = None,
+                 can_use_tool: Callable | None = None,
+                 on_tool_call: Callable | None = None,
+                 on_tool_result: Callable | None = None,
+                 quantize: bool = False, bits: int = 4,
                  **params):
         if engine is None:
             from .engine import Engine
@@ -148,7 +155,28 @@ class Agent:
         self.system = system
         self.max_steps = max_steps
         self.tool_choice = tool_choice
+        # 权限：allowed/blocked 名单 + 自定义 can_use_tool 组合成一个权限函数
+        self.allowed_tools = allowed_tools
+        self.blocked_tools = blocked_tools
+        self.can_use_tool = can_use_tool
+        self.on_tool_call = on_tool_call
+        self.on_tool_result = on_tool_result
         self.params = params
+
+    def _permission(self):
+        """把 allowed/blocked 名单与 can_use_tool 组合成传给 run_agent 的权限函数。"""
+        allowed, blocked, custom = self.allowed_tools, self.blocked_tools, self.can_use_tool
+        if allowed is None and blocked is None and custom is None:
+            return None
+
+        def check(name, args):
+            if blocked and name in blocked:
+                return f"工具 {name} 在禁用名单中"
+            if allowed is not None and name not in allowed:
+                return f"工具 {name} 不在允许名单中"
+            return custom(name, args) if custom else True
+
+        return check
 
     @property
     def tools(self) -> list[dict]:
@@ -164,23 +192,38 @@ class Agent:
         return msgs
 
     def stream(self, user: str, history: list[dict] | None = None) -> Iterator[tuple[str, Any]]:
-        """逐步产出 (kind, data)：kind ∈ {'tool_call','tool_result','final'}。"""
+        """逐步产出 (kind, data)：kind ∈ {'delta','tool_call','tool_result','final'}。"""
         from .agent import run_agent
         msgs = self._messages(user, history)
         yield from run_agent(self.engine, self._toolset, msgs,
                              max_steps=self.max_steps, tool_choice=self.tool_choice,
+                             permission=self._permission(),
+                             on_tool_call=self.on_tool_call,
+                             on_tool_result=self.on_tool_result,
                              **self.params)
 
     def run(self, user: str, history: list[dict] | None = None) -> AgentResult:
-        """跑完整个工具调用循环，返回结构化结果。"""
+        """跑完整个工具调用循环，返回结构化结果（含用量统计）。"""
         steps: list[dict] = []
         text = ""
+        tool_calls = denied = 0
         for kind, data in self.stream(user, history):
             if kind == "tool_call":
                 steps.append({"type": "tool_call", **data})
+                tool_calls += 1
             elif kind == "tool_result":
                 steps.append({"type": "tool_result", **data})
+                if data.get("denied"):
+                    denied += 1
             elif kind == "final":
                 text = data
         messages = self._messages(user, history) + [{"role": "assistant", "content": text}]
-        return AgentResult(text=text, steps=steps, messages=messages)
+        # 用量统计（对标 SDK 的 message.usage）：轮数/工具次数/拒绝数 + 完成文本 token
+        try:
+            completion_tokens = len(self.engine.tok.encode(text)) if text else 0
+        except Exception:
+            completion_tokens = 0
+        usage = {"tool_calls": tool_calls, "denied": denied,
+                 "steps": sum(1 for s in steps if s["type"] == "tool_call"),
+                 "completion_tokens": completion_tokens}
+        return AgentResult(text=text, steps=steps, messages=messages, usage=usage)

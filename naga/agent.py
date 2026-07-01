@@ -117,6 +117,37 @@ def _looks_like_tool_attempt(text: str, names: list[str]) -> bool:
             or any(n in text for n in names))
 
 
+def apply_permission(permission, name: str, args: dict):
+    """把 can_use_tool 回调的返回值规整成 (allowed, args, reason)。
+
+    permission(name, args) 的返回约定（对标 Claude Agent SDK 的 canUseTool）：
+      None / True                 -> 允许，参数不变
+      False                       -> 拒绝（默认理由）
+      "拒绝理由"（str）           -> 拒绝，理由作为工具结果回给模型
+      {"input": {...}}            -> 允许，但用新参数替换（可脱敏/纠偏）
+      {"allow": False, "reason":} -> 拒绝
+      {"allow": True, "input":}   -> 允许（可带新参数）
+    """
+    if permission is None:
+        return True, args, ""
+    try:
+        d = permission(name, args)
+    except Exception as e:
+        return False, args, f"权限检查出错: {e}"
+    if d is None or d is True:
+        return True, args, ""
+    if d is False:
+        return False, args, "该工具被权限策略拒绝"
+    if isinstance(d, str):
+        return False, args, d
+    if isinstance(d, dict):
+        if d.get("allow") is False or "reason" in d and "allow" not in d and "input" not in d:
+            return False, args, d.get("reason", "该工具被权限策略拒绝")
+        new_args = d.get("input", args)
+        return True, (new_args if isinstance(new_args, dict) else args), ""
+    return True, args, ""
+
+
 def _peek_stream(engine, msgs, params):
     """流式生成，但先"窥视"开头判断是不是工具调用尝试。
 
@@ -139,7 +170,8 @@ def _peek_stream(engine, msgs, params):
 
 
 def run_agent(engine, mcp, messages, max_steps: int = 5,
-              tool_choice: str = "auto", **params):
+              tool_choice: str = "auto", *, permission=None,
+              on_tool_call=None, on_tool_result=None, **params):
     """生成器，逐步 yield (kind, data)：kind ∈ {'delta','tool_call','tool_result','final'}。
 
     'delta' 是最终答案的逐 token 增量（含工具执行后的作答也流式）；'final' 在结尾再发一次
@@ -147,7 +179,13 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
     判别是否工具调用，其余一路流式——修掉了"开了 MCP 后普通对话整段返回、不流式"的问题。
 
     tool_choice（仿 OpenAI 语义）：'auto' 模型自决（格式错用约束解码修复）；'required' 强制
-    首步产出合法工具调用；'none' 纯自由生成。"""
+    首步产出合法工具调用；'none' 纯自由生成。
+
+    权限与 Hooks（对标 Claude Agent SDK 的 canUseTool / PreToolUse / PostToolUse）：
+      permission(name, args)     每次工具调用前的权限门（返回值见 apply_permission）；
+                                 拒绝时不执行工具，把拒绝理由当工具结果回填、循环继续。
+      on_tool_call(name, args)   工具执行前的钩子（观测/审计，副作用）。
+      on_tool_result(name, res)  工具执行后的钩子。"""
     tools = mcp.tools()
     names = [t["name"] for t in tools]
     msgs = list(messages)
@@ -195,12 +233,30 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
             yield ("final", text)
             return
 
-        # 单轮执行**全部**工具调用（并行语义），逐个 emit，再一次性回填历史
+        # 单轮执行**全部**工具调用（并行语义）：权限门 -> pre 钩子 -> 执行 -> post 钩子
         results = []
         for call in calls:
+            name = call["name"]
+            allowed, args, reason = apply_permission(permission, name, call.get("arguments", {}))
+            call = {"name": name, "arguments": args}    # 可能被权限改写了参数
             yield ("tool_call", call)
-            result = mcp.call(call["name"], call.get("arguments", {}))
-            yield ("tool_result", {"name": call["name"], "result": result})
+            if not allowed:                             # 拒绝：不执行，理由当结果回填
+                result = f"[权限拒绝] {reason}"
+                yield ("tool_result", {"name": name, "result": result, "denied": True})
+                results.append((call, result))
+                continue
+            if on_tool_call:
+                try:
+                    on_tool_call(name, args)
+                except Exception:
+                    pass
+            result = mcp.call(name, args)
+            if on_tool_result:
+                try:
+                    on_tool_result(name, result)
+                except Exception:
+                    pass
+            yield ("tool_result", {"name": name, "result": result})
             results.append((call, result))
         # 回填：一条 assistant（含所有调用）+ 一条 user（汇总所有工具结果）
         assistant_text = text or "\n".join(
