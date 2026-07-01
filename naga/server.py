@@ -610,7 +610,10 @@ def mcp_state(req: Request):
 async def mcp_add(req: Request):
     _require_admin(req)
     b = await req.json()
-    err = manager.mcp.add_server(b["name"], b["command"], b.get("args", []), b.get("env"))
+    if b.get("url"):                              # HTTP 传输：连远程/托管 MCP 服务器
+        err = manager.mcp.add_http_server(b["name"], b["url"], b.get("headers"))
+    else:                                         # stdio 传输：本地子进程
+        err = manager.mcp.add_server(b["name"], b["command"], b.get("args", []), b.get("env"))
     return {"ok": err is None, "error": err}
 
 
