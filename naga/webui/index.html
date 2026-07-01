@@ -64,12 +64,52 @@
   .empty { color: var(--muted); text-align: center; margin-top: 18vh; }
   .msg { display: flex; margin: 14px 0; }
   .msg.user { justify-content: flex-end; }
-  .bubble { padding: 11px 15px; border-radius: 14px; max-width: 80%; white-space: pre-wrap;
+  /* 气泡的宽度上限放在外层列容器上（相对 .msg=.wrap 的确定宽度），
+     避免"气泡 80% 相对收缩包裹的父级"造成宽度塌缩、中文逐字竖排。 */
+  .msg > div { max-width: 80%; min-width: 0; }
+  .bubble { padding: 11px 15px; border-radius: 14px; max-width: 100%; white-space: pre-wrap;
     word-break: break-word; }
   .user .bubble { background: var(--user); color: #fff; border-bottom-right-radius: 4px; }
   .assist .bubble { background: var(--assist); border: 1px solid var(--line);
     border-bottom-left-radius: 4px; }
   .role { font-size: 11px; color: var(--muted); margin: 0 4px 4px; }
+  /* 自研 Markdown 渲染的元素样式 */
+  .content p { margin: 6px 0; }
+  .content h1,.content h2,.content h3,.content h4 { margin: 10px 0 6px; line-height: 1.3; }
+  .content h1 { font-size: 1.5em; } .content h2 { font-size: 1.3em; }
+  .content h3 { font-size: 1.15em; } .content h4 { font-size: 1.05em; }
+  .content ul,.content ol { margin: 6px 0; padding-left: 22px; }
+  .content li { margin: 2px 0; }
+  .content a { color: #6ea8ff; }
+  .content code.inline { background: #0d1017; border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 5px; font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
+  .content pre { background: #0d1017; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
+  .content pre code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; white-space: pre; }
+  .content blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
+  .content hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
+  .md-table { border-collapse: collapse; margin: 8px 0; font-size: 13.5px; width: 100%; }
+  .md-table th,.md-table td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+  .md-table th { background: #0d1017; font-weight: 600; }
+  .md-table tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  /* LaTeX 子集 */
+  .math { font-style: italic; font-family: "Cambria Math", Georgia, serif; }
+  .math-block { text-align: center; margin: 10px 0; font-size: 1.05em; }
+  .frac { display: inline-flex; flex-direction: column; vertical-align: middle;
+    text-align: center; font-size: .85em; }
+  .frac-n { border-bottom: 1px solid currentColor; padding: 0 4px; }
+  .frac-d { padding: 0 4px; }
+  .sqrt-r { border-top: 1px solid currentColor; padding: 0 2px; }
+  /* 工具调用折叠块：小字、muted、默认收起 */
+  .toolcall { margin: 6px 0; border: 1px solid var(--line); border-radius: 8px;
+    background: #14171e; font-size: 12px; color: var(--muted); }
+  .toolcall > summary { cursor: pointer; padding: 5px 9px; list-style: none;
+    user-select: none; color: var(--muted); }
+  .toolcall > summary::-webkit-details-marker { display: none; }
+  .toolcall > summary::before { content: "▸ "; }
+  .toolcall[open] > summary::before { content: "▾ "; }
+  .toolcall .tcbody { padding: 4px 10px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #9aa3b6; }
   .cursor::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
   @keyframes blink { 50% { opacity: 0; } }
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 14px 0; }
@@ -137,6 +177,7 @@
     </main>
   </div>
 
+<script src="/naga-render.js"></script>
 <script>
 const list = document.getElementById('list');
 const chatsEl = document.getElementById('chats');
@@ -237,13 +278,20 @@ function addBubble(role, text, imageUrl) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   if (imageUrl) { const im = document.createElement('img'); im.src = imageUrl; bubble.appendChild(im); }
-  const span = document.createElement('span');
-  span.textContent = text;
-  bubble.appendChild(span);
+  const content = document.createElement('div');
+  content.className = 'content';
+  renderMd(content, text, role);
+  bubble.appendChild(content);
   col.appendChild(tag); col.appendChild(bubble); msg.appendChild(col);
   list.appendChild(msg);
   scrollDown();
-  return span;
+  return content;   // 流式时对 content 重新渲染
+}
+// 用户消息保持纯文本；助手消息走自研 Markdown/LaTeX/工具折叠渲染
+function renderMd(el, text, role) {
+  if (role === 'user') { el.textContent = text; return; }
+  if (window.NagaRender) NagaRender.render(el, text);
+  else el.textContent = text;
 }
 function scrollDown() { const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight; }
 
@@ -347,7 +395,7 @@ async function send() {
         const payload = line.slice(5).trim();
         if (payload === '[DONE]') continue;
         const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
-        if (delta) { acc += delta; bubble.textContent = acc; scrollDown(); }
+        if (delta) { acc += delta; renderMd(bubble, acc, 'assistant'); scrollDown(); }
       }
     }
   } catch (err) {
