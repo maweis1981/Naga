@@ -83,3 +83,24 @@ def test_tool_choice_none_skips_tool_path(tool_client):
     choice = r.json()["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert "tool_calls" not in choice["message"]
+
+
+def test_native_function_call_roundtrip_final_answer(tool_client):
+    """第二个 round-trip：客户端回填 assistant.tool_calls + tool 结果后，应产出最终答案而非再次调工具。
+
+    这是 Open WebUI native 函数调用真正可用的关键路径（工具结果 -> grounded 回答）。"""
+    r = tool_client.post("/v1/chat/completions", json={
+        "model": "naga-test",
+        "messages": [
+            {"role": "user", "content": "2+3?"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "add", "arguments": '{"a":2,"b":3}'}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "5"},
+        ],
+        "tools": [ADD_TOOL], "tool_choice": "auto",
+    })
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"                 # 收尾，不再调工具
+    assert not choice["message"].get("tool_calls")
+    assert "5" in (choice["message"].get("content") or "")   # grounded 于工具结果
