@@ -135,6 +135,7 @@ class Agent:
 
     def __init__(self, model: str | None = None, *, engine: Any = None,
                  tools: list[Callable] | None = None, mcp: Any = None,
+                 name: str | None = None, description: str | None = None,
                  system: str | None = None, max_steps: int = 5,
                  tool_choice: str = "auto",
                  allowed_tools: list[str] | None = None,
@@ -152,6 +153,8 @@ class Agent:
         self._toolset = _CompositeToolset(
             [FunctionToolset(tools) if tools else None, mcp]
         )
+        self.name = name
+        self.description = description
         self.system = system
         self.max_steps = max_steps
         self.tool_choice = tool_choice
@@ -227,3 +230,26 @@ class Agent:
                  "steps": sum(1 for s in steps if s["type"] == "tool_call"),
                  "completion_tokens": completion_tokens}
         return AgentResult(text=text, steps=steps, messages=messages, usage=usage)
+
+    def as_tool(self, name: str | None = None, description: str | None = None) -> Callable:
+        """把本 Agent 封装成一个可被**主 Agent 调用**的工具，实现子代理委派（对标 SDK 的 subagents）。
+
+        主 Agent 调用该工具 -> 用 `task` 参数运行本子 Agent -> 返回其最终答案文本。
+        子 Agent 有自己的 system/工具/权限，专注子任务。用法：
+            researcher = Agent(..., name="researcher", description="查资料")
+            main = Agent(..., tools=[researcher.as_tool()])
+        """
+        tname = name or self.name or "subagent"
+        desc = description or self.description or f"把子任务委派给 {tname} 子代理处理"
+
+        def delegate(task: str) -> str:
+            return self.run(task).text
+
+        delegate._naga_tool_name = tname            # type: ignore[attr-defined]
+        delegate._naga_tool_desc = desc              # type: ignore[attr-defined]
+        delegate._naga_tool_schema = {               # type: ignore[attr-defined]
+            "type": "object",
+            "properties": {"task": {"type": "string", "description": "交给子代理完成的任务描述"}},
+            "required": ["task"],
+        }
+        return delegate

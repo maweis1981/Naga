@@ -136,3 +136,48 @@ def test_agent_usage_populated():
     assert res.usage["tool_calls"] == 1
     assert res.usage["denied"] == 0
     assert "completion_tokens" in res.usage
+
+
+# ── 子代理委派（subagents） ────────────────────────────────────────
+class SubagentEng:
+    """子代理引擎：不调工具，直接给出答案 'SUBRESULT'。"""
+    model_id = "t"
+    tok = _AgentTok()
+
+    def stream(self, msgs, **kw):
+        yield Chunk(delta="SUBRESULT")
+        yield Chunk(done=True)
+
+
+class MainEng:
+    """主代理引擎：首轮委派给 researcher 子代理，拿到结果后作答。"""
+    model_id = "t"
+    tok = _AgentTok()
+
+    def stream(self, msgs, **kw):
+        joined = " ".join(str(m.get("content", "")) for m in msgs)
+        if "<tool_response" in joined:
+            yield Chunk(delta="final based on sub")
+        else:
+            yield Chunk(delta='{"name":"researcher","arguments":{"task":"go find it"}}')
+        yield Chunk(done=True)
+
+
+def test_as_tool_metadata():
+    sub = Agent(engine=SubagentEng(), name="researcher", description="查资料的子代理")
+    fn = sub.as_tool()
+    assert fn._naga_tool_name == "researcher"
+    assert "task" in fn._naga_tool_schema["properties"]
+    assert fn("anything") == "SUBRESULT"          # 直接调用即运行子代理
+
+
+def test_subagent_delegation_through_main_agent():
+    sub = Agent(engine=SubagentEng(), name="researcher", description="查资料")
+    main = Agent(engine=MainEng(), tools=[sub.as_tool()])
+    res = main.run("please research X")
+    # 主代理调用了 researcher 工具，且拿到子代理结果 SUBRESULT
+    calls = [s for s in res.steps if s["type"] == "tool_call"]
+    assert calls and calls[0]["name"] == "researcher"
+    results = [s for s in res.steps if s["type"] == "tool_result"]
+    assert results[0]["result"] == "SUBRESULT"
+    assert res.text == "final based on sub"
