@@ -11,6 +11,7 @@ It is built for developers who want a lightweight, hackable engine to run, serve
 - **Hand-written multimodal inference** — Qwen2/Qwen2.5 text models and LLaVA-style vision models (self-written SigLIP ViT + projector), with a KV-cached two-phase (prefill/decode) generation loop.
 - **Weight quantization (INT4 / INT8)** — self-written `QuantizedLinear` + `QuantizedEmbedding` on `mx.quantized_matmul`. ~1.8× faster decode, ~3× lower memory.
 - **RadixAttention prefix caching** — a radix tree that reuses KV across requests; flat per-turn latency for multi-turn chat, RAG, and agent loops.
+- **Batched decoding** — multiple sequences (of different lengths, via left-padding + per-sequence RoPE positions and pad-masking) decoded in one batched forward for ~1.6× aggregate throughput at B=6. Numerically exact vs serial in fp32 (see `tests/test_batched.py`); A/B in `scratch_batch.py`.
 - **Constrained decoding** — a self-written JSON grammar automaton that guarantees valid, schema-correct tool calls even from tiny models.
 - **OpenAI-compatible serving** — `/v1/chat/completions` with SSE streaming, standard function calling (pass `tools` → get structured `tool_calls` back, honoring `tool_choice: auto | required | {function}` via constrained decoding), plus a self-built single-page WebUI.
 - **Local memory + RAG** — hand-written BERT embeddings, semantic retrieval, and document (txt/md/pdf) chunking & retrieval.
@@ -156,7 +157,7 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P0** | Engine core: Transformer forward + single-shot CLI | ✅ |
 | **P1** | KV-cache + sampling (temperature / top-p) + streaming | ✅ |
 | **P2** | OpenAI-compatible HTTP API (`/v1/chat/completions` + SSE) | ✅ |
-| **P3** | Concurrent scheduling (single-worker serial scheduler ✅; token-level continuous batching ⬜) | 🚧 |
+| **P3** | Concurrent scheduling (serial scheduler ✅; batched decode ✅ — 1.6× throughput at B=6; mid-flight continuous admission ⬜) | 🚧 |
 | **P4** | Multimodal vision (self-written SigLIP ViT + projector) | ✅ |
 | **P5** | WebUI (self-built single-page streaming chat) | ✅ |
 | **P6** | Model management (scan / hot-swap / download) + settings | ✅ |
