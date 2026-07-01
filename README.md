@@ -173,7 +173,9 @@ naga-serve  # OpenAI-compatible server + WebUI
 naga-vlm    # direct multimodal CLI
 ```
 
-Runtime data (settings, memory, documents, MCP servers) lives under `~/.naga/`.
+Runtime data (settings, memory, documents, MCP servers, last-active model) lives under `~/.naga/`.
+Naga remembers the model you last switched to: start `naga serve` with no `--model` and it
+restores your last active model (falling back to a built-in default on first run).
 
 ## Security Notes
 

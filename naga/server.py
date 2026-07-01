@@ -712,10 +712,13 @@ async def admin_settings(req: Request):
     return {"ok": True, "settings": manager.settings}
 
 
+DEFAULT_MODEL = "llava-hf/llava-interleave-qwen-0.5b-hf"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Naga 服务")
-    ap.add_argument("--model", default="llava-hf/llava-interleave-qwen-0.5b-hf",
-                    help="启动时加载的默认模型（多模态模型可同时处理文本和图片）")
+    ap.add_argument("--model", default=None,
+                    help="启动时加载的模型；不指定则恢复上次用的模型，再退回内置默认")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--admin-token", default=None,
@@ -726,10 +729,14 @@ def main():
 
     global ADMIN_TOKEN, manager
     ADMIN_TOKEN = args.admin_token or os.environ.get("NAGA_ADMIN_TOKEN")
+    mgr_mod = _manager_module()
+    # 模型选择优先级：命令行显式 > 上次活跃（持久化）> 内置默认
+    model = args.model or mgr_mod.load_last_model() or DEFAULT_MODEL
+    restored = (not args.model) and model != DEFAULT_MODEL
     q = "（Q%d 量化）" % args.bits if args.quantize else ""
-    print(f"⏳ 启动，默认加载 {args.model}{q} ...", flush=True)
-    manager = _manager_module().ModelManager(
-        default_model=args.model, quantize=args.quantize, bits=args.bits
+    print(f"⏳ 启动，加载 {model}{q}{'（恢复上次）' if restored else ''} ...", flush=True)
+    manager = mgr_mod.ModelManager(
+        default_model=model, quantize=args.quantize, bits=args.bits
     )
     print(f"✓ 就绪 http://{args.host}:{args.port}   设置页 /settings", flush=True)
 

@@ -23,6 +23,7 @@ from .loader import ensure_local
 HF_HUB = Path.home() / ".cache" / "huggingface" / "hub"
 NAGA_DIR = Path.home() / ".naga"
 SETTINGS_FILE = NAGA_DIR / "settings.json"
+STATE_FILE = NAGA_DIR / "state.json"       # 运行期状态：记住上次活跃的模型
 
 DEFAULT_SETTINGS = {
     "temperature": 0.7,
@@ -48,6 +49,26 @@ def save_settings(s: dict):
     NAGA_DIR.mkdir(exist_ok=True)
     clean = {k: s[k] for k in DEFAULT_SETTINGS if k in s}
     SETTINGS_FILE.write_text(json.dumps({**DEFAULT_SETTINGS, **clean}, ensure_ascii=False, indent=2))
+
+
+def load_last_model() -> str | None:
+    """读取上次活跃的模型 id（供重启后恢复）；无记录返回 None。"""
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text()).get("last_model")
+        except Exception:
+            pass
+    return None
+
+
+def save_last_model(model_id: str):
+    NAGA_DIR.mkdir(exist_ok=True)
+    try:
+        state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    except Exception:
+        state = {}
+    state["last_model"] = model_id
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _repo_from_dir(d: Path) -> str:
@@ -119,7 +140,7 @@ class ModelManager:
     def ensure(self, model_id: str):
         """确保 model_id 已加载并设为活跃；超过上限时卸载旧模型。"""
         if model_id in self.engines:
-            self.active = model_id
+            self._set_active(model_id)
             return self.engines[model_id]
 
         if len(self.engines) >= self.max_loaded:
@@ -133,8 +154,17 @@ class ModelManager:
 
         engine = _build_engine(model_id, self.quantize, self.bits)
         self.engines[model_id] = engine
-        self.active = model_id
+        self._set_active(model_id)
         return engine
+
+    def _set_active(self, model_id: str):
+        """设为活跃并持久化，便于下次启动恢复（仅在变化时落盘）。"""
+        if self.active != model_id:
+            self.active = model_id
+            try:
+                save_last_model(model_id)
+            except Exception:
+                pass
 
     def get(self, model_id: str | None = None):
         """取引擎：指定且已知就切过去，否则用当前活跃模型。"""
