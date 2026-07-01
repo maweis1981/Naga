@@ -80,6 +80,25 @@ def test_embeddings_validation(client):
     assert r.status_code == 400
 
 
+def test_context_length_exceeded(client, plain_engine):
+    plain_engine.args.max_position_embeddings = 10   # 收紧上下文窗口以触发
+    long_msg = " ".join(["word"] * 50)               # FakeTok 按空格切 -> ~50 token
+    r = client.post("/v1/chat/completions",
+                    json={"model": "naga-test",
+                          "messages": [{"role": "user", "content": long_msg}]})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "context_length_exceeded"
+    assert err["type"] == "invalid_request_error"
+    plain_engine.args.max_position_embeddings = 32768   # 复原，免影响其他用例
+
+
+def test_context_length_ok_for_short_prompt(client):
+    r = client.post("/v1/chat/completions",
+                    json={"model": "naga-test", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200                        # 短 prompt 不受影响
+
+
 def test_batch_endpoint(client):
     r = client.post("/batch", json={"model": "naga-test", "inputs": [
         [{"role": "user", "content": "one"}],

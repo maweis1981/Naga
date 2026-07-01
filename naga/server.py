@@ -337,6 +337,12 @@ async def chat_completions(req: Request):
     messages = _normalize_messages(messages)     # 规整 tool_calls / tool 角色 / None content
     engine = manager.get(body.get("model"))     # 按 model 字段路由 / 回退到活跃模型
     model_name = engine.model_id
+
+    # 上下文长度保护：prompt + 预留输出不得超过模型窗口，否则返回标准 OpenAI 错误
+    ctx_err = _context_length_error(engine, messages, body)
+    if ctx_err is not None:
+        return ctx_err
+
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     stream = bool(body.get("stream", False))
@@ -508,6 +514,28 @@ def _count_tokens(engine, messages: list[dict]) -> int:
         return len(engine.tok.encode(engine.tok.apply_chat_template(messages)))
     except Exception:
         return 0
+
+
+def _context_length_error(engine, messages: list[dict], body: dict):
+    """prompt + 预留输出超过模型上下文窗口时，返回标准 OpenAI 400 错误；否则 None。
+
+    对标 OpenAI 的 context_length_exceeded：与其让底层产出乱码/晦涩错误，不如明确拒绝。"""
+    max_ctx = getattr(getattr(engine, "args", None), "max_position_embeddings", 0)
+    if not max_ctx:
+        return None
+    prompt_tokens = _count_tokens(engine, messages)
+    want_out = int(body.get("max_tokens") or 0)
+    if prompt_tokens + want_out > max_ctx:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": (f"This model's maximum context length is {max_ctx} tokens. "
+                        f"However, your messages resulted in {prompt_tokens} tokens"
+                        + (f" and you requested {want_out} completion tokens" if want_out else "")
+                        + ". Please shorten the conversation."),
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "param": "messages",
+        }})
+    return None
 
 
 @app.post("/batch")

@@ -25,6 +25,10 @@ class FakeTok:
         return ""
 
 
+class _Args:
+    max_position_embeddings = 32768
+
+
 class PlainEngine:
     """只产文本：固定吐 'Hello, world' + 用量。"""
 
@@ -32,6 +36,7 @@ class PlainEngine:
 
     def __init__(self):
         self.tok = FakeTok()
+        self.args = _Args()
 
     def stream(self, messages, **kw):
         for d in ["Hello", ", ", "world"]:
@@ -54,6 +59,7 @@ class ToolEngine:
 
     def __init__(self):
         self.tok = FakeTok()
+        self.args = _Args()
 
     def stream(self, messages, **kw):
         joined = " ".join(str(m.get("content", "")) for m in messages)

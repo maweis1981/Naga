@@ -24,6 +24,7 @@ class ModelArgs:
     rope_theta: float         # RoPE 的底数，决定位置编码的"波长"
     head_dim: int             # 每个头的维度 = hidden / num_heads（一般）
     tie_word_embeddings: bool # 输入词嵌入和输出 lm_head 是否共享权重
+    max_position_embeddings: int = 32768  # 模型支持的最大上下文长度（token 数）
     fast_attn: bool = False   # 运行期开关：True=走融合注意力快路径（非模型超参）
 
 
@@ -41,4 +42,5 @@ def load_config(model_path: Path) -> ModelArgs:
         rope_theta=cfg.get("rope_theta", 1_000_000.0),
         head_dim=head_dim,
         tie_word_embeddings=cfg.get("tie_word_embeddings", False),
+        max_position_embeddings=cfg.get("max_position_embeddings", 32768),
     )
