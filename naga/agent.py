@@ -22,8 +22,9 @@ TOOL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
 def build_tool_prompt(tools: list[dict]) -> str:
     lines = ["你可以调用以下工具来获取信息或执行操作："]
     for t in tools:
-        lines.append(f"- {t['name']}：{t['description']}　参数: "
-                     f"{json.dumps(t['schema'].get('properties', {}), ensure_ascii=False)}")
+        props = (t.get("schema") or {}).get("properties", {})
+        lines.append(f"- {t.get('name', '')}：{t.get('description', '')}　参数: "
+                     f"{json.dumps(props, ensure_ascii=False)}")
     lines.append(
         '当需要工具时，只输出一行：<tool_call>{"name":"工具名","arguments":{参数}}</tool_call> '
         '然后停止，等我把结果给你；拿到结果后再用自然语言回答用户。不需要工具就直接回答。'
@@ -171,7 +172,7 @@ def _peek_stream(engine, msgs, params):
 
 def run_agent(engine, mcp, messages, max_steps: int = 5,
               tool_choice: str = "auto", *, permission=None,
-              on_tool_call=None, on_tool_result=None, **params):
+              on_tool_call=None, on_tool_result=None, tool_selector=None, **params):
     """生成器，逐步 yield (kind, data)：kind ∈ {'delta','tool_call','tool_result','final'}。
 
     'delta' 是最终答案的逐 token 增量（含工具执行后的作答也流式）；'final' 在结尾再发一次
@@ -185,8 +186,14 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
       permission(name, args)     每次工具调用前的权限门（返回值见 apply_permission）；
                                  拒绝时不执行工具，把拒绝理由当工具结果回填、循环继续。
       on_tool_call(name, args)   工具执行前的钩子（观测/审计，副作用）。
-      on_tool_result(name, res)  工具执行后的钩子。"""
+      on_tool_result(name, res)  工具执行后的钩子。
+      tool_selector(tools)->tools 意图路由：工具多时按用户意图只保留最相关的 top-k（见 toolindex）。"""
     tools = mcp.tools()
+    if tool_selector and tools:
+        try:
+            tools = tool_selector(tools) or tools    # 意图匹配筛选（失败则回退全量）
+        except Exception:
+            pass
     names = [t["name"] for t in tools]
     msgs = list(messages)
     if tools:

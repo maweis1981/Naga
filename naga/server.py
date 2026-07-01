@@ -423,7 +423,10 @@ async def chat_completions(req: Request):
         def pieces():
             # 逐 token 转发 delta（普通回答/工具后作答都有打字机效果）；tool_call/tool_result
             # 转成可读标记；final 跳过（内容已由 delta 流出，避免重复）。
-            for kind, data in run_agent(engine, manager.mcp, messages, **_params(body)):
+            # 意图路由：工具多时按用户这句话的意图,只把最相关的工具交给模型
+            selector = manager.tool_index.selector(query) if getattr(manager, "tool_index", None) else None
+            for kind, data in run_agent(engine, manager.mcp, messages,
+                                        tool_selector=selector, **_params(body)):
                 if kind == "delta":
                     yield data
                 elif kind == "tool_call":
@@ -768,6 +771,7 @@ async def mcp_add(req: Request):
         err = manager.mcp.add_http_server(b["name"], b["url"], b.get("headers"))
     else:                                         # stdio 传输：本地子进程
         err = manager.mcp.add_server(b["name"], b["command"], b.get("args", []), b.get("env"))
+    manager.sync_tool_index()                     # 新工具入库,供意图路由
     return {"ok": err is None, "error": err}
 
 
@@ -775,6 +779,7 @@ async def mcp_add(req: Request):
 async def mcp_remove(req: Request):
     _require_admin(req)
     manager.mcp.remove_server((await req.json())["name"])
+    manager.sync_tool_index()                     # 从索引移除该服务器的工具
     return {"ok": True}
 
 

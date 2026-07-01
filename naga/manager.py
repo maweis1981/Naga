@@ -134,8 +134,18 @@ class ModelManager:
         from .mcp import MCPManager
         self.mcp = MCPManager()             # MCP 工具服务器
         self.mcp.connect_all()              # 连接已配置的服务器（无配置则空转）
+        from .toolindex import ToolIndex
+        self.tool_index = ToolIndex()       # 工具语义索引（意图路由用）
+        self.sync_tool_index()
         if default_model:
             self.ensure(default_model)
+
+    def sync_tool_index(self):
+        """识别当前 MCP 工具集并嵌入落盘（连接/增删 MCP 服务器后调用）。失败不致命。"""
+        try:
+            self.tool_index.sync(self.mcp.tools())
+        except Exception:
+            pass
 
     def ensure(self, model_id: str):
         """确保 model_id 已加载并设为活跃；超过上限时卸载旧模型。"""
