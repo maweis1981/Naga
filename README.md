@@ -17,7 +17,7 @@ It is built for developers who want a lightweight, hackable engine to run, serve
 - **MCP agent** — MCP client over **stdio** (local subprocess, with per-call timeouts so a stalled server can't hang a request) **or Streamable HTTP** (remote/hosted servers, JSON or SSE responses), plus a tool-calling loop (`tool_choice: auto | required | none`). Config in `~/.naga/mcp.json`: `{"mcpServers": {"local": {"command": "python3", "args": [...]}, "remote": {"url": "https://host/mcp", "headers": {"Authorization": "Bearer ..."}}}}`.
 - **Agent SDK** — an importable `Agent` class + `@tool` decorator (`naga.sdk`) that turns plain Python functions into tools (JSON schema auto-derived from type hints) and runs the constrained tool-calling loop locally, composable with MCP servers. See `examples/agent_sdk_demo.py`.
 - **Live monitor dashboard** — `/monitor` streams every inference (prefill/decode tok/s, prefix-cache reuse, tool calls) plus a hardware panel (CPU per-core, unified memory, MLX VRAM, and — with `naga.powermon` — GPU utilization/power/thermal).
-- **Self-observability & metrics** — the same event stream is rolled up into optimization-grade metrics: `GET /metrics` (JSON: decode tok/s p50/p95, TTFT distribution, prefix-cache reuse ratio, per-model throughput, tool frequency) and `GET /metrics/prometheus` (Prometheus exposition for Grafana/OpenTelemetry), plus a `GET /health` probe for Open WebUI and orchestrators.
+- **Self-observability, tracking & optimization** — the same event stream is rolled up into optimization-grade metrics: `GET /metrics` (JSON: decode tok/s p50/p95, TTFT distribution, prefix-cache reuse ratio, per-model throughput, queue depth, tool frequency), `GET /metrics/prometheus` (Prometheus exposition for Grafana/OpenTelemetry), `GET /metrics/advice` (an **optimization advisor** that reads the live profile and suggests concrete tuning — quantize, cut context, check prefix stability, etc.), `GET /metrics/history` (persisted throughput/latency/cache trends that survive restarts, for A/B-ing configs), plus a `GET /health` probe for Open WebUI and orchestrators.
 - **Benchmark & profiling tools** — reproducible A/B harnesses for quantization, attention, prefix caching, and constrained decoding.
 
 ## Requirements
@@ -169,6 +169,7 @@ Everything above the MLX tensor-operator layer is implemented from scratch.
 | **P13** | RadixAttention prefix KV cache | ✅ |
 | **P14** | Constrained decoding (JSON grammar + tool-call constraint) | ✅ |
 | **P15** | Self-observability: rolled-up metrics (`/metrics` JSON + Prometheus) + `/health` | ✅ |
+| **P19** | Optimization advisor (`/metrics/advice`) + persisted metric history (`/metrics/history`) | ✅ |
 | **P16** | Agent SDK (`naga.sdk`: `Agent` + `@tool`, local functions + MCP) | ✅ |
 
 ```

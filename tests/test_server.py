@@ -78,3 +78,17 @@ def test_chat_completion_stream_without_usage_option(client):
 def test_embeddings_validation(client):
     r = client.post("/v1/embeddings", json={"input": ""})
     assert r.status_code == 400
+
+
+def test_metrics_advice(client):
+    r = client.get("/metrics/advice")
+    assert r.status_code == 200
+    advice = r.json()["advice"]
+    assert isinstance(advice, list) and advice
+    assert all("level" in t and "area" in t and "message" in t for t in advice)
+
+
+def test_metrics_history_endpoint(client):
+    r = client.get("/metrics/history")
+    assert r.status_code == 200
+    assert isinstance(r.json()["history"], list)

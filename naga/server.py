@@ -44,6 +44,10 @@ ADMIN_TOKEN: str | None = None
 WEBUI = Path(__file__).parent / "webui"
 _SENTINEL = object()   # run_in_threadpool(next, it, _SENTINEL) 的迭代结束标记
 
+from .optimize import MetricsHistory
+
+metrics_hist = MetricsHistory(Path.home() / ".naga" / "metrics.jsonl")
+
 
 def _cors_origins() -> tuple[list[str], str]:
     # 默认只放行本机页面与常见本地开发地址，避免把管理界面暴露给任意站点跨域调用。
@@ -157,6 +161,19 @@ def metrics_prometheus():
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(monitor.stats.prometheus(),
                              media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.get("/metrics/advice")
+def metrics_advice():
+    """优化顾问：基于当前指标画像给出可执行的调优建议（自跟踪—自优化闭环的"优化"环）。"""
+    from .optimize import advise
+    return {"advice": advise(monitor.stats.snapshot())}
+
+
+@app.get("/metrics/history")
+def metrics_history(n: int = 200):
+    """指标历史趋势（重启后仍在）：decode/TTFT/前缀复用随时间的变化，便于对比配置收益。"""
+    return {"history": metrics_hist.recent(n)}
 
 
 @app.get("/monitor/stream")
@@ -656,8 +673,31 @@ def main():
     )
     print(f"✓ 就绪 http://{args.host}:{args.port}   设置页 /settings", flush=True)
 
+    _start_metrics_snapshotter()
+
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+def _start_metrics_snapshotter(interval_s: int = 60):
+    """后台线程：定期把指标快照落盘成历史趋势（仅在有生成活动时写，避免刷空数据）。"""
+    import threading
+    import time as _time
+
+    def loop():
+        last_gen = -1
+        while True:
+            _time.sleep(interval_s)
+            snap = monitor.stats.snapshot()
+            gens = snap["totals"]["generations"]
+            if gens != last_gen:                      # 只在有新生成时记录一帧
+                last_gen = gens
+                try:
+                    metrics_hist.append(snap, _time.time())
+                except Exception:
+                    pass
+
+    threading.Thread(target=loop, daemon=True, name="naga-metrics").start()
 
 
 if __name__ == "__main__":
