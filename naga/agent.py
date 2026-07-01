@@ -237,6 +237,11 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
         results = []
         for call in calls:
             name = call["name"]
+            if on_tool_call:                            # pre 钩子：审计每次尝试（含随后被拒的）
+                try:
+                    on_tool_call(name, call.get("arguments", {}))
+                except Exception:
+                    pass
             allowed, args, reason = apply_permission(permission, name, call.get("arguments", {}))
             call = {"name": name, "arguments": args}    # 可能被权限改写了参数
             yield ("tool_call", call)
@@ -245,11 +250,6 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
                 yield ("tool_result", {"name": name, "result": result, "denied": True})
                 results.append((call, result))
                 continue
-            if on_tool_call:
-                try:
-                    on_tool_call(name, args)
-                except Exception:
-                    pass
             result = mcp.call(name, args)
             if on_tool_result:
                 try:
