@@ -70,3 +70,44 @@ def test_get_missing_returns_none(tmp_path):
     s = ConversationStore(tmp_path)
     assert s.get("abc123") is None
     assert s.save("abc123", []) is None
+
+
+# ── HTTP API 测试 ──────────────────────────────────────────────────
+def _api_client(tmp_path):
+    from fastapi.testclient import TestClient
+    from naga import server
+    server.conversations = ConversationStore(tmp_path)
+    return TestClient(server.app)
+
+
+def test_api_crud_flow(tmp_path):
+    c = _api_client(tmp_path)
+    # 建
+    r = c.post("/api/chats", json={})
+    cid = r.json()["id"]
+    assert r.status_code == 200 and cid
+    # 存消息
+    r = c.put(f"/api/chats/{cid}", json={"messages": [{"role": "user", "content": "你好世界"}]})
+    assert r.json()["title"] == "你好世界"
+    # 取
+    r = c.get(f"/api/chats/{cid}")
+    assert r.json()["messages"][0]["content"] == "你好世界"
+    # 列表
+    r = c.get("/api/chats")
+    assert any(x["id"] == cid for x in r.json()["chats"])
+    # 改名
+    r = c.patch(f"/api/chats/{cid}", json={"title": "改过的标题"})
+    assert r.json()["title"] == "改过的标题"
+    # 删
+    assert c.delete(f"/api/chats/{cid}").json()["ok"] is True
+    assert c.get(f"/api/chats/{cid}").status_code == 404
+
+
+def test_api_bad_id_returns_400(tmp_path):
+    c = _api_client(tmp_path)
+    assert c.get("/api/chats/not-hex-id!").status_code == 400
+
+
+def test_api_missing_returns_404(tmp_path):
+    c = _api_client(tmp_path)
+    assert c.get("/api/chats/deadbeef").status_code == 404
