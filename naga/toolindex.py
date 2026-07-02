@@ -101,7 +101,20 @@ class ToolIndex:
 
         供 run_agent 的 tool_selector 用，让 agent.py 不直接依赖嵌入器（解耦）。"""
         def select(tools: list[dict]) -> list[dict]:
+            from .trace import tracer
             if len(tools) <= threshold:
+                tracer.event("intent_route", triggered=False, total=len(tools),
+                             threshold=threshold, selected=[t.get("name") for t in tools])
                 return tools
-            return self.search(query, tools, top_k=top_k)
+            picked = self.search(query, tools, top_k=top_k)
+            with tracer.span("intent_route", triggered=True, total=len(tools),
+                             threshold=threshold, top_k=top_k, query=query) as s:
+                try:
+                    qv = self._encode(query)
+                    scored = sorted(((sum(a*b for a,b in zip(qv, self.entries[t["name"]]["vec"]))
+                        if t.get("name") in self.entries else 0.0, t.get("name")) for t in tools), key=lambda x:-x[0])
+                    s.set(candidates=[{"tool":n,"score":round(sc,3)} for sc,n in scored[:top_k+3]],
+                          selected=[t.get("name") for t in picked])
+                except Exception: pass
+            return picked
         return select
