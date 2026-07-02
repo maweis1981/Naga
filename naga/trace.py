@@ -39,16 +39,16 @@ class Tracer:
         try: yield trace
         finally: self.bind(prev)
     @contextlib.contextmanager
-    def span(self, name, **attrs):
+    def span(self, span_name, **attrs):
         t = self.current
         if t is None:
             yield _NULL; return
-        s = Span(name, attrs); (t.stack[-1].children if t.stack else t.root).append(s)
+        s = Span(span_name, attrs); (t.stack[-1].children if t.stack else t.root).append(s)
         t.stack.append(s)
         try: yield s
         finally: s._close(); t.stack.pop()
-    def event(self, name, **attrs):
-        with self.span(name, **attrs): pass
+    def event(self, span_name, **attrs):
+        with self.span(span_name, **attrs): pass
     def finish(self, trace, output=""):
         if trace is None: return trace
         trace.output = output; trace.dur_ms = _ms(time.perf_counter() - trace._t0)
