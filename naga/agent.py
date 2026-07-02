@@ -257,7 +257,10 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
                 yield ("tool_result", {"name": name, "result": result, "denied": True})
                 results.append((call, result))
                 continue
-            result = mcp.call(name, args)
+            from .trace import tracer
+            with tracer.span("tool.call", name=name, arguments=args, step=step) as _sp:
+                result = mcp.call(name, args)
+                _sp.set(result=str(result)[:800])
             if on_tool_result:
                 try:
                     on_tool_result(name, result)
