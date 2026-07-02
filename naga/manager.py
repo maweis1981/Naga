@@ -135,6 +135,9 @@ class ModelManager:
         self.mcp = MCPManager()             # MCP 工具服务器
         self.mcp.connect_all()              # 连接已配置的服务器（无配置则空转）
         from .toolindex import ToolIndex
+        from .builtins import BuiltinToolset, CompositeToolset
+        self.builtins = BuiltinToolset()    # 内置预置工具（时间/万年历/天气/IP定位，无需配MCP）
+        self.agent_toolset = CompositeToolset([self.builtins, self.mcp])  # 内置 + MCP 统一视图
         self.tool_index = ToolIndex()       # 工具语义索引（意图路由用）
         self.sync_tool_index()
         if default_model:
@@ -143,7 +146,7 @@ class ModelManager:
     def sync_tool_index(self):
         """识别当前 MCP 工具集并嵌入落盘（连接/增删 MCP 服务器后调用）。失败不致命。"""
         try:
-            self.tool_index.sync(self.mcp.tools())
+            self.tool_index.sync(self.agent_toolset.tools())
         except Exception:
             pass
 
