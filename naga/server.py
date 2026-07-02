@@ -429,7 +429,8 @@ async def chat_completions(req: Request):
         })
 
     # MCP 工具调用：开启且有可用工具时，走 Agent 循环
-    if manager.settings.get("mcp_enabled") and manager.mcp.tools():
+    _toolset = getattr(manager, "agent_toolset", None) or manager.mcp
+    if manager.settings.get("mcp_enabled") and _toolset.tools():
         from .agent import run_agent
 
         prompt_tokens = _count_tokens(engine, messages)
@@ -443,7 +444,7 @@ async def chat_completions(req: Request):
             # 意图路由：工具多时按用户这句话的意图,只把最相关的工具交给模型
             selector = manager.tool_index.selector(query) if getattr(manager, "tool_index", None) else None
             try:
-              for kind, data in run_agent(engine, manager.mcp, messages,
+              for kind, data in run_agent(engine, _toolset, messages,
                                         tool_selector=selector, **_params(body)):
                 if kind == "delta":
                     _out.append(data); yield data
