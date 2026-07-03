@@ -20,13 +20,38 @@ TOOL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
 
 
 def build_tool_prompt(tools: list[dict]) -> str:
-    lines = ["你可以调用以下工具来获取信息或执行操作："]
+    """按 MCP 标准元数据结构化描述工具：标题、说明、每个参数的必填/类型/说明/枚举值。
+
+    充分读取工具 schema，让模型有依据正确填参（必填不可省、枚举只能从给定值里选）——
+    而不是只给参数名让它瞎猜/瞎编。"""
+    lines = ["你可以调用以下工具。调用前请按每个参数的说明填写：必填参数不可省略；"
+             "标注了「可选值」的参数只能从给定值里选，不要自己编。"]
     for t in tools:
-        props = (t.get("schema") or {}).get("properties", {})
-        lines.append(f"- {t.get('name', '')}：{t.get('description', '')}　参数: "
-                     f"{json.dumps(props, ensure_ascii=False)}")
+        title = t.get("title") or t.get("name", "")
+        head = f"\n■ {t.get('name','')}"
+        if title and title != t.get("name", ""):
+            head += f"（{title}）"
+        head += f"：{t.get('description','')}"
+        lines.append(head)
+        schema = t.get("schema") or {}
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        if not props:
+            lines.append("    （无参数）")
+            continue
+        lines.append("    参数：")
+        for pname, pinfo in props.items():
+            pinfo = pinfo if isinstance(pinfo, dict) else {}
+            req = "必填" if pname in required else "可选"
+            ptype = pinfo.get("type", "")
+            pdesc = pinfo.get("description", "")
+            line = f"      - {pname}（{req}" + (f"，{ptype}" if ptype else "") + f"）：{pdesc}"
+            enum = pinfo.get("enum")
+            if enum:
+                line += f"　可选值：{json.dumps(enum, ensure_ascii=False)}"
+            lines.append(line)
     lines.append(
-        '当需要工具时，只输出一行：<tool_call>{"name":"工具名","arguments":{参数}}</tool_call> '
+        '\n当需要工具时，只输出一行：<tool_call>{"name":"工具名","arguments":{参数}}</tool_call> '
         '然后停止，等我把结果给你；拿到结果后再用自然语言回答用户。不需要工具就直接回答。'
     )
     return "\n".join(lines)
