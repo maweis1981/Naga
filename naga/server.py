@@ -456,6 +456,8 @@ async def chat_completions(req: Request):
                     monitor.emit("tool_result", name=data["name"],
                                  result=str(data["result"])[:300])
                     yield f"↩ {data['result']}\n\n"
+                elif kind == "clarify":       # 参数澄清 → 标记，前端渲染成可点选按钮
+                    yield "\n<naga-clarify>" + json.dumps(data, ensure_ascii=False) + "</naga-clarify>\n"
                 # kind == "final": 已由 delta 流出，忽略
             finally:
                 tracer.finish(_trace, "".join(_out)); tracer.bind(None)
@@ -603,6 +605,24 @@ async def batch(req: Request):
             for i, r in enumerate(results)
         ],
     }
+
+
+@app.post("/tool/call")
+async def tool_call_exec(req: Request):
+    """执行一次工具调用（用户在澄清后补全参数点选执行用）。body: {name, arguments}。"""
+    body = await req.json()
+    name = body.get("name")
+    args = body.get("arguments", {})
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    ts = getattr(manager, "agent_toolset", None) or manager.mcp
+
+    def job():
+        yield ts.call(name, args)
+
+    result = (await run_in_threadpool(lambda: list(scheduler.submit(job).results())))[0]
+    monitor.emit("tool_call", name=name, arguments=args)
+    return {"name": name, "arguments": args, "result": result}
 
 
 @app.post("/v1/embeddings")
