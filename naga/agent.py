@@ -274,6 +274,13 @@ def run_agent(engine, mcp, messages, max_steps: int = 5,
         results = []
         for call in calls:
             name = call["name"]
+            spec = next((t for t in tools if t.get("name") == name), None)
+            if spec:  # 参数澄清（选项B）：非法/瞎编参数且能给真实候选 → 让用户选
+                from .clarify import needs_clarify
+                clar = needs_clarify(spec, call.get("arguments", {}), mcp)
+                if clar:
+                    yield ("clarify", {**clar, "arguments": call.get("arguments", {})})
+                    return
             if on_tool_call:                            # pre 钩子：审计每次尝试（含随后被拒的）
                 try:
                     on_tool_call(name, call.get("arguments", {}))
