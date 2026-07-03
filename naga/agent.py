@@ -158,15 +158,20 @@ def _peek_stream(engine, msgs, params):
     gen = engine.stream(msgs, **params)
     buffered: list[str] = []
     looks_tool = False
+    # 多缓冲一点再判定：模型常在 JSON 前带个 '>'、空白或短前缀（如 `>{"name"...`），
+    # 只看首字符会把工具调用误判成普通回答、导致工具永不执行。扫描前若干字符里的迹象。
     for ch in gen:
         if ch.done:
             break
         if ch.delta:
             buffered.append(ch.delta)
         head = "".join(buffered).lstrip()
-        if head:                                  # 拿到第一段可见文本即可判定
-            looks_tool = head[0] in "<{" or head.lower().startswith("tool_call")
-            break
+        low = head.lower()
+        if "{" in head or "<tool_call" in low or '"name"' in low:
+            looks_tool = True; break
+        # 攒够一小段仍没出现工具迹象，就当普通回答（保留打字机流式）
+        if len(head) >= 24:
+            looks_tool = False; break
     return looks_tool, buffered, gen
 
 
