@@ -35,3 +35,30 @@ def test_weather_poster_gen_fail_returns_prompt(monkeypatch):
 
 def test_weather_poster_registered():
     assert "weather_poster" in {t["name"] for t in BuiltinToolset().tools()}
+
+
+def test_weather_poster_uses_injected_llm(monkeypatch):
+    monkeypatch.setattr(B, "tool_weather", lambda c: {"city":c,"condition":"晴","temperature_c":26,
+                        "today_low":25,"today_high":39,"humidity":71})
+    monkeypatch.setattr(B, "_floniks_generate",
+                        lambda prompt, alias="nano_banana_2": "https://x/"+("LLM" if "MYLLM" in prompt else "TPL")+".png")
+    B.set_prompt_llm(lambda city, w: "MYLLM creative prompt for "+city)
+    try:
+        out = tool_weather_poster("北京")
+        assert out["prompt"] == "MYLLM creative prompt for 北京"   # 用了 qwen 生成的 prompt
+        assert out["image_url"].endswith("LLM.png")
+    finally:
+        B.set_prompt_llm(None)
+
+
+def test_weather_poster_llm_fail_falls_back(monkeypatch):
+    monkeypatch.setattr(B, "tool_weather", lambda c: {"city":c,"condition":"晴","temperature_c":26,
+                        "today_low":25,"today_high":39,"humidity":71})
+    monkeypatch.setattr(B, "_floniks_generate", lambda prompt, alias="nano_banana_2": "https://x/out.png")
+    def boom(city, w): raise RuntimeError("llm down")
+    B.set_prompt_llm(boom)
+    try:
+        out = tool_weather_poster("北京")
+        assert "4:5" in out["prompt"]                             # LLM 失败 → 降级模板
+    finally:
+        B.set_prompt_llm(None)

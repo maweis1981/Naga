@@ -80,6 +80,12 @@ def tool_locate_by_ip(ip: str = ""):
 
 
 # ── 工作流工具：天气播报海报（naga 引擎内部编排：天气→prompt→生图→轮询）──
+_PROMPT_LLM = None
+def set_prompt_llm(fn):
+    """注入用 LLM 生成海报 prompt 的函数 fn(city, weather)->str；未注入则用内置模板兜底。"""
+    global _PROMPT_LLM
+    _PROMPT_LLM = fn
+
 POSTER_MOODS = {
     "晴":"bright warm golden sunlight, clear blue sky, cheerful uplifting mood, sun rays",
     "晴间多云":"soft golden light with a few clouds, warm pleasant mood",
@@ -160,7 +166,14 @@ def tool_weather_poster(city: str = "", model_alias: str = "nano_banana_2"):
     w = tool_weather(city)
     if "error" in w:
         return w
-    prompt = _build_poster_prompt(city, w)
+    prompt = None
+    if _PROMPT_LLM:                                   # 用 qwen 创作 prompt（更智能）
+        try:
+            prompt = _PROMPT_LLM(city, w)
+        except Exception:
+            prompt = None
+    if not prompt:                                    # LLM 未注入/失败 → 模板兜底
+        prompt = _build_poster_prompt(city, w)
     try:
         img = _floniks_generate(prompt, model_alias)
     except Exception as e:
