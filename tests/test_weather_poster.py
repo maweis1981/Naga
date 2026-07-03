@@ -45,7 +45,7 @@ def test_weather_poster_uses_injected_llm(monkeypatch):
     B.set_prompt_llm(lambda city, w: "MYLLM creative prompt for "+city)
     try:
         out = tool_weather_poster("北京")
-        assert out["prompt"] == "MYLLM creative prompt for 北京"   # 用了 qwen 生成的 prompt
+        assert "MYLLM creative prompt for 北京" in out["prompt"]   # qwen 内容保留（后处理会追加要求/关键词）
         assert out["image_url"].endswith("LLM.png")
     finally:
         B.set_prompt_llm(None)
