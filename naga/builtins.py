@@ -108,12 +108,12 @@ def _build_poster_prompt(city, w):
     return (
         f"A modern flat-illustration weather-forecast poster for social media, vertical 4:5, "
         f"depicting {city} city skyline with recognizable landmarks under {cond} weather. "
-        f"{mood}. Clean minimal design, generous negative space at the top for a headline, "
-        f"a large friendly weather icon representing '{cond}', and a lower info band area. "
-        f"Temperature about {w.get('temperature_c')}°C (today {w.get('today_low')}°C to {w.get('today_high')}°C), "
-        f"humidity {w.get('humidity')}%. Soft pastel gradient background, vibrant but tasteful palette, "
-        f"subtle long shadows, high detail, professional editorial poster, trending on Behance, 8k, "
-        f"crisp vector style. No text, no letters, no words."
+        f"{mood}. Clean minimal design, a large friendly weather icon representing '{cond}', "
+        f"soft pastel gradient background, vibrant but tasteful palette, professional editorial poster, "
+        f"high detail, 8k. IMPORTANT: render the following text ON the poster, crisp, correctly spelled, "
+        f"nicely typeset and clearly legible — a title \"{city}\" at top, a big temperature "
+        f"\"{w.get('temperature_c')} C\" as the focal point, the condition \"{cond}\", "
+        f"a line \"H {w.get('today_high')} L {w.get('today_low')}\", and \"Humidity {w.get('humidity')}%\"."
     )
 
 def _floniks_config():

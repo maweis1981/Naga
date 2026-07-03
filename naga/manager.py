@@ -152,8 +152,11 @@ class ModelManager:
             user_p = (f"为『{city}』今日天气生成一段高质量英文文生图 prompt，用于社交媒体天气播报海报。"
                       f"天气：{w.get('condition')}，气温{w.get('temperature_c')}°C"
                       f"（今日{w.get('today_low')}~{w.get('today_high')}°C），湿度{w.get('humidity')}%。"
-                      f"要求：竖版4:5、现代扁平插画风、可辨识的{city}城市地标天际线、顶部留白给标题、"
-                      f"醒目天气图标、专业海报质感、避免出现文字(No text)。只输出 prompt 本身。")
+                      f"要求：竖版4:5、现代扁平插画风、可辨识的{city}城市地标天际线、醒目天气图标、专业海报质感。"
+                      f"**必须在海报上清晰渲染以下文字**（拼写完全正确、排版美观、字体清晰易读）："
+                      f"标题『{city}』、大号温度『{w.get('temperature_c')}°C』、"
+                      f"天气『{w.get('condition')}』、'H:{w.get('today_high')}° L:{w.get('today_low')}°'、"
+                      f"'Humidity {w.get('humidity')}%'。只输出 prompt 本身。")
             msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}]
             txt = "".join(ch.delta for ch in engine.stream(msgs, max_tokens=320, temp=0.7)
                           if not getattr(ch, "done", False)).strip()

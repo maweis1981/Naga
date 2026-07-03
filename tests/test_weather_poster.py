@@ -6,7 +6,7 @@ def test_prompt_uses_weather_and_no_text():
     w = {"condition":"晴","temperature_c":26.7,"today_low":25,"today_high":39,"humidity":71}
     p = _build_poster_prompt("北京", w)
     assert "北京" in p and "4:5" in p and "26.7" in p
-    assert "No text" in p                                  # 文字留后期叠加
+    assert "render the following text" in p                # 要求画出天气文字
     assert "golden sunlight" in p                          # 晴天氛围
     p2 = _build_poster_prompt("上海", {"condition":"小雨","temperature_c":18,"today_low":15,"today_high":20,"humidity":90})
     assert "rain" in p2 and "golden sunlight" not in p2    # 雨天氛围不同
@@ -59,6 +59,6 @@ def test_weather_poster_llm_fail_falls_back(monkeypatch):
     B.set_prompt_llm(boom)
     try:
         out = tool_weather_poster("北京")
-        assert "4:5" in out["prompt"]                             # LLM 失败 → 降级模板
+        assert "4:5" in out["prompt"] and "render the following text" in out["prompt"]  # LLM失败→模板
     finally:
         B.set_prompt_llm(None)
