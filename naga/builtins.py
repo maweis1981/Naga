@@ -51,22 +51,44 @@ def tool_calendar_info(date_str: str = ""):
             "day_of_year": d.timetuple().tm_yday, "week_of_year": int(d.strftime("%W")),
             "year_ganzhi": _ganzhi_year(y), "zodiac": ZODIAC[(y-4)%12], "is_weekend": d.weekday()>=5}
 
+def _weather_openmeteo(city):
+    g = _get_json("https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&name="+urllib.parse.quote(city))
+    res = (g or {}).get("results") or []
+    if not res: raise RuntimeError("geocoding 无结果")
+    loc = res[0]; lat, lon = loc["latitude"], loc["longitude"]
+    w = _get_json(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min&timezone=auto", timeout=8)
+    cur = w.get("current",{}); daily = w.get("daily",{})
+    return {"city": loc.get("name"), "country": loc.get("country",""), "source": "open-meteo",
+            "temperature_c": cur.get("temperature_2m"), "condition": WMO.get(cur.get("weather_code"),"未知"),
+            "humidity": cur.get("relative_humidity_2m"), "wind_kmh": cur.get("wind_speed_10m"),
+            "today_high": (daily.get("temperature_2m_max") or [None])[0],
+            "today_low": (daily.get("temperature_2m_min") or [None])[0]}
+
+_WTTR_CN = {"Sunny":"晴","Clear":"晴","Partly cloudy":"多云","Cloudy":"多云","Overcast":"阴",
+            "Mist":"雾","Fog":"雾","Patchy rain possible":"小雨","Light rain":"小雨","Moderate rain":"中雨",
+            "Heavy rain":"大雨","Light snow":"小雪","Moderate snow":"中雪","Heavy snow":"大雪",
+            "Thundery outbreaks possible":"雷阵雨","Patchy light rain":"小雨"}
+
+def _weather_wttr(city):
+    d = _get_json("https://wttr.in/"+urllib.parse.quote(city)+"?format=j1", timeout=10)
+    cur = d["current_condition"][0]; today = d["weather"][0]
+    desc = (cur.get("weatherDesc") or [{}])[0].get("value","").strip()
+    area = (d.get("nearest_area") or [{}])[0]
+    name = ((area.get("areaName") or [{}])[0].get("value") or city)
+    return {"city": name, "country": ((area.get("country") or [{}])[0].get("value","")), "source": "wttr.in",
+            "temperature_c": float(cur.get("temp_C")), "condition": _WTTR_CN.get(desc, desc or "未知"),
+            "humidity": int(cur.get("humidity")), "wind_kmh": float(cur.get("windspeedKmph") or 0),
+            "today_high": float(today.get("maxtempC")), "today_low": float(today.get("mintempC"))}
+
 def tool_weather(city: str = ""):
     if not city: return {"error":"请提供城市名 city"}
-    try:
-        g = _get_json("https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&name="+urllib.parse.quote(city))
-        res = (g or {}).get("results") or []
-        if not res: return {"error": f"找不到城市: {city}"}
-        loc = res[0]; lat, lon = loc["latitude"], loc["longitude"]
-        w = _get_json(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min&timezone=auto")
-        cur = w.get("current",{}); daily = w.get("daily",{})
-        return {"city": loc.get("name"), "country": loc.get("country",""),
-                "temperature_c": cur.get("temperature_2m"), "condition": WMO.get(cur.get("weather_code"),"未知"),
-                "humidity": cur.get("relative_humidity_2m"), "wind_kmh": cur.get("wind_speed_10m"),
-                "today_high": (daily.get("temperature_2m_max") or [None])[0],
-                "today_low": (daily.get("temperature_2m_min") or [None])[0]}
-    except Exception as e:
-        return {"error": f"天气查询失败: {e}"}
+    errors = []
+    for src in (_weather_openmeteo, _weather_wttr):     # 主源失败自动切备用源
+        try:
+            return src(city)
+        except Exception as e:
+            errors.append(f"{src.__name__}: {e}")
+    return {"error": "天气服务暂时不可达（已尝试多个数据源）", "detail": errors}
 
 def tool_locate_by_ip(ip: str = ""):
     try:
