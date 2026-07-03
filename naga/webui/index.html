@@ -100,6 +100,12 @@
   .frac-n { border-bottom: 1px solid currentColor; padding: 0 4px; }
   .frac-d { padding: 0 4px; }
   .sqrt-r { border-top: 1px solid currentColor; padding: 0 2px; }
+.clarify { margin:8px 0; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#14171e; }
+  .clarify-q { color:var(--text); font-size:13.5px; margin-bottom:8px; }
+  .clarify-opts { display:flex; flex-wrap:wrap; gap:8px; }
+  .clarify-btn { background:var(--user); color:#fff; border:none; border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; font-size:13px; }
+  .clarify-btn:hover { filter:brightness(1.1); }
+  .clarify-btn:disabled { opacity:.5; cursor:default; }
   /* 工具调用折叠块：小字、muted、默认收起 */
   .toolcall { margin: 6px 0; border: 1px solid var(--line); border-radius: 8px;
     background: #14171e; font-size: 12px; color: var(--muted); }
@@ -287,6 +293,26 @@ function addBubble(role, text, imageUrl) {
   scrollDown();
   return content;   // 流式时对 content 重新渲染
 }
+// 澄清按钮点击：用补全后的参数执行工具，结果就地展示
+window.nagaClarifyPick = async function(data, value, boxEl) {
+  boxEl.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+  var args = Object.assign({}, data.arguments || {}); args[data.param] = value;
+  var info = document.createElement('div'); info.className = 'clarify-q';
+  info.textContent = '已选择「' + value + '」，正在执行 ' + data.tool + ' …';
+  boxEl.appendChild(info);
+  try {
+    var r = await fetch('/tool/call', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: data.tool, arguments: args }) });
+    var d = await r.json();
+    var res = document.createElement('div'); res.className = 'tcbody';
+    res.textContent = '↩ ' + (typeof d.result === 'string' ? d.result : JSON.stringify(d.result));
+    boxEl.appendChild(res);
+  } catch (e) {
+    var err = document.createElement('div'); err.className = 'clarify-q'; err.textContent = '执行失败: ' + e;
+    boxEl.appendChild(err);
+  }
+};
+
 // 用户消息保持纯文本；助手消息走自研 Markdown/LaTeX/工具折叠渲染
 function renderMd(el, text, role) {
   if (role === 'user') { el.textContent = text; return; }

@@ -207,8 +207,7 @@
   }
 
   // ---------- 工具调用折叠：抽出 🔧/↩ 段，其余走 markdown ----------
-  function render(target, raw) {
-    target.innerHTML = '';
+  function renderChunk(target, raw) {
     const lines = (raw || '').split('\n');
     let i = 0;
     const isTool = (l) => /^\s*(🔧|↩)/.test(l);
@@ -232,6 +231,39 @@
       const txt = buf.join('\n');
       if (txt.trim()) renderBlocks(target, txt);
     }
+  }
+
+  function buildClarify(data) {
+    var box = document.createElement('div'); box.className = 'clarify';
+    var q = document.createElement('div'); q.className = 'clarify-q';
+    q.textContent = data.question || ('请选择 ' + (data.param || ''));
+    box.appendChild(q);
+    var opts = document.createElement('div'); opts.className = 'clarify-opts';
+    (data.options || []).forEach(function (o) {
+      var b = document.createElement('button'); b.className = 'clarify-btn';
+      b.textContent = o.label || o.value;
+      if (o.type) b.title = o.type;
+      b.onclick = function () { if (window.nagaClarifyPick) window.nagaClarifyPick(data, o.value, box); };
+      opts.appendChild(b);
+    });
+    box.appendChild(opts);
+    return box;
+  }
+
+  function render(target, raw) {
+    target.innerHTML = '';
+    raw = raw || '';
+    var re = /<naga-clarify>([\s\S]*?)<\/naga-clarify>/g;
+    var last = 0, m, any = false;
+    while ((m = re.exec(raw)) !== null) {
+      any = true;
+      var before = raw.slice(last, m.index);
+      if (before.trim()) renderChunk(target, before);
+      try { target.appendChild(buildClarify(JSON.parse(m[1]))); } catch (e) {}
+      last = re.lastIndex;
+    }
+    var rest = raw.slice(last);
+    if (rest.trim() || !any) renderChunk(target, rest);
   }
 
   window.NagaRender = { render, renderInline, latexToNode };
