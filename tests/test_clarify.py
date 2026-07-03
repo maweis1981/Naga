@@ -77,3 +77,23 @@ def test_run_agent_emits_clarify():
     assert "tool_result" not in kinds
     clar = next(d for k, d in events if k == "clarify")
     assert clar["param"] == "modelId" and any(o["value"] == "nano_banana_2" for o in clar["options"])
+
+
+def test_tool_call_endpoint():
+    from fastapi.testclient import TestClient
+    from naga import server
+
+    class ToolsetStub:
+        def call(self, n, a):
+            return f"RESULT:{n}:{a.get('modelId')}"
+
+    class Mgr:
+        agent_toolset = ToolsetStub()
+        mcp = ToolsetStub()
+
+    server.manager = Mgr()
+    c = TestClient(server.app)
+    r = c.post("/tool/call", json={"name": "single_task", "arguments": {"modelId": "nano_banana_2"}})
+    assert r.status_code == 200
+    assert r.json()["result"] == "RESULT:single_task:nano_banana_2"
+    assert c.post("/tool/call", json={}).status_code == 400
