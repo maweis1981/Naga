@@ -78,6 +78,112 @@ def tool_locate_by_ip(ip: str = ""):
     except Exception as e:
         return {"error": f"IP 定位失败: {e}"}
 
+
+# ── 工作流工具：天气播报海报（naga 引擎内部编排：天气→prompt→生图→轮询）──
+_PROMPT_LLM = None
+def set_prompt_llm(fn):
+    """注入用 LLM 生成海报 prompt 的函数 fn(city, weather)->str；未注入则用内置模板兜底。"""
+    global _PROMPT_LLM
+    _PROMPT_LLM = fn
+
+POSTER_MOODS = {
+    "晴":"bright warm golden sunlight, clear blue sky, cheerful uplifting mood, sun rays",
+    "晴间多云":"soft golden light with a few clouds, warm pleasant mood",
+    "多云":"soft diffused daylight, scattered fluffy clouds, calm gentle mood",
+    "阴":"overcast soft grey light, calm moody atmosphere",
+    "雾":"soft misty fog, dreamy low-visibility atmosphere",
+    "小雨":"gentle rain, wet reflective streets, cozy umbrellas, fresh clean air",
+    "中雨":"steady rain, glossy wet pavement, dramatic soft clouds",
+    "大雨":"heavy rain, dramatic dark clouds, moody wet city",
+    "雷阵雨":"dramatic storm clouds, distant lightning, dynamic energetic sky",
+    "小雪":"soft falling snow, serene white winter, cozy warm window lights",
+    "中雪":"steady snowfall, peaceful snowy cityscape, cool blue tones",
+    "大雪":"heavy snow, wintry blizzard mood, warm glowing lights",
+}
+
+def _build_poster_prompt(city, w):
+    """根据真实天气动态构造社交媒体海报级生图 prompt（文生图；文字后期叠加）。"""
+    cond = w.get("condition", "")
+    mood = POSTER_MOODS.get(cond, "natural pleasant daylight, clean atmosphere")
+    return (
+        f"A modern flat-illustration weather-forecast poster for social media, vertical 4:5, "
+        f"depicting {city} city skyline with recognizable landmarks under {cond} weather. "
+        f"{mood}. Clean minimal design, generous negative space at the top for a headline, "
+        f"a large friendly weather icon representing '{cond}', and a lower info band area. "
+        f"Temperature about {w.get('temperature_c')}°C (today {w.get('today_low')}°C to {w.get('today_high')}°C), "
+        f"humidity {w.get('humidity')}%. Soft pastel gradient background, vibrant but tasteful palette, "
+        f"subtle long shadows, high detail, professional editorial poster, trending on Behance, 8k, "
+        f"crisp vector style. No text, no letters, no words."
+    )
+
+def _floniks_config():
+    """从 ~/.naga/mcp.json 读一个 HTTP 型 MCP（floniks 优先）的 url + headers。"""
+    import json as _j
+    from pathlib import Path as _P
+    f = _P.home()/".naga"/"mcp.json"
+    if not f.exists(): return None
+    try:
+        servers = _j.loads(f.read_text()).get("mcpServers", {})
+        # 优先 floniks，其次任意含 single_task 能力的 HTTP MCP
+        for name, spec in servers.items():
+            if spec.get("url") and "floniks" in name.lower():
+                return spec["url"], spec.get("headers", {})
+        for name, spec in servers.items():
+            if spec.get("url"):
+                return spec["url"], spec.get("headers", {})
+    except Exception:
+        pass
+    return None
+
+def _floniks_generate(prompt, model_alias="nano_banana_2", max_polls=2):
+    """调 MCP single_task 发起文生图 + 轮询 get_task 取图，返回 image_url（失败抛异常）。"""
+    import re
+    cfg = _floniks_config()
+    if not cfg:
+        raise RuntimeError("未配置 HTTP 型 MCP（~/.naga/mcp.json 无 url 服务器）")
+    url, headers = cfg
+    from .mcp import MCPHttpClient
+    c = MCPHttpClient("floniks", url, headers)
+    c.initialize()
+    res = c.call("single_task", {"modelId": model_alias, "modelType": "text_to_image", "prompt": prompt})
+    m = re.search(r'"task_id"\s*:\s*"([^"]+)"', res)
+    if not m:
+        raise RuntimeError("发起生图失败: " + str(res)[:200])
+    tid = m.group(1)
+    for _ in range(max_polls):
+        r = c.call("get_task", {"id": tid, "wait_seconds": 50})
+        urls = re.findall(r'https?://[^\s"\\]+\.(?:png|jpg|jpeg|webp)', r)
+        if urls:
+            return urls[0]
+        if '"terminal": true' in r or '"terminal":true' in r:
+            raise RuntimeError("任务终止但无图: " + str(r)[:200])
+    raise RuntimeError("生图超时，task_id=" + tid + "（可稍后用 get_task 查询）")
+
+def tool_weather_poster(city: str = "", model_alias: str = "nano_banana_2"):
+    """一站式：取真实天气 → 构造 prompt → 生成天气播报海报，返回图片 URL + markdown。"""
+    if not city:
+        return {"error": "请提供城市名 city"}
+    w = tool_weather(city)
+    if "error" in w:
+        return w
+    prompt = None
+    if _PROMPT_LLM:                                   # 用 qwen 创作 prompt（更智能）
+        try:
+            prompt = _PROMPT_LLM(city, w)
+        except Exception:
+            prompt = None
+    if not prompt:                                    # LLM 未注入/失败 → 模板兜底
+        prompt = _build_poster_prompt(city, w)
+    try:
+        img = _floniks_generate(prompt, model_alias)
+    except Exception as e:
+        return {"error": f"生图失败: {e}", "weather": w, "prompt": prompt}
+    return {"city": w.get("city"), "condition": w.get("condition"),
+            "temperature_c": w.get("temperature_c"),
+            "today_low": w.get("today_low"), "today_high": w.get("today_high"),
+            "prompt": prompt, "image_url": img,
+            "markdown": f"![{city}今日天气播报]({img})"}
+
 _SPECS = [
     {"name":"current_time","arg":"timezone","fn":tool_current_time,
      "description":"获取当前日期、时间、星期、时区。可选 timezone（如 Asia/Shanghai）",
@@ -91,6 +197,9 @@ _SPECS = [
     {"name":"locate_by_ip","arg":"ip","fn":tool_locate_by_ip,
      "description":"按 IP 近似定位所在城市、地区、时区、经纬度。可选 ip（留空为服务器出口 IP）",
      "schema":{"type":"object","properties":{"ip":{"type":"string"}}}},
+    {"name":"weather_poster","arg":"city","fn":tool_weather_poster,
+     "description":"生成某城市今日天气播报海报（发社交网络用）：自动取实时天气→构造高质量生图prompt→调MCP文生图→返回图片URL。参数 city",
+     "schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},
 ]
 
 class BuiltinToolset:

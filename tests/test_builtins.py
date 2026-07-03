@@ -18,7 +18,7 @@ def test_calendar_bad_date():
 
 def test_toolset_tools_and_call():
     ts = BuiltinToolset()
-    assert {t["name"] for t in ts.tools()} == {"current_time","calendar_info","weather","locate_by_ip"}
+    assert {t["name"] for t in ts.tools()} == {"current_time","calendar_info","weather","locate_by_ip","weather_poster"}
     out = json.loads(ts.call("calendar_info", {"date":"2024-02-10"}))
     assert out["zodiac"]=="龙"
     assert ts.call("nope",{}).startswith("[错误]")

@@ -135,13 +135,31 @@ class ModelManager:
         self.mcp = MCPManager()             # MCP 工具服务器
         self.mcp.connect_all()              # 连接已配置的服务器（无配置则空转）
         from .toolindex import ToolIndex
-        from .builtins import BuiltinToolset, CompositeToolset
+        from .builtins import BuiltinToolset, CompositeToolset, set_prompt_llm
         self.builtins = BuiltinToolset()    # 内置预置工具（时间/万年历/天气/IP定位，无需配MCP）
         self.agent_toolset = CompositeToolset([self.builtins, self.mcp])  # 内置 + MCP 统一视图
+        set_prompt_llm(self._make_poster_prompt)  # 用当前 qwen 模型创作海报 prompt
         self.tool_index = ToolIndex()       # 工具语义索引（意图路由用）
         self.sync_tool_index()
         if default_model:
             self.ensure(default_model)
+
+    def _make_poster_prompt(self, city, w):
+        """用当前 qwen 模型为天气海报生成高质量英文文生图 prompt（失败返回 None→降级模板）。"""
+        try:
+            engine = self.get()
+            sys_p = "你是专业的 AI 文生图提示词工程师。只输出一段英文 prompt，不要任何解释或引号。"
+            user_p = (f"为『{city}』今日天气生成一段高质量英文文生图 prompt，用于社交媒体天气播报海报。"
+                      f"天气：{w.get('condition')}，气温{w.get('temperature_c')}°C"
+                      f"（今日{w.get('today_low')}~{w.get('today_high')}°C），湿度{w.get('humidity')}%。"
+                      f"要求：竖版4:5、现代扁平插画风、可辨识的{city}城市地标天际线、顶部留白给标题、"
+                      f"醒目天气图标、专业海报质感、避免出现文字(No text)。只输出 prompt 本身。")
+            msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_p}]
+            txt = "".join(ch.delta for ch in engine.stream(msgs, max_tokens=320, temp=0.7)
+                          if not getattr(ch, "done", False)).strip()
+            return txt if len(txt) > 30 else None
+        except Exception:
+            return None
 
     def sync_tool_index(self):
         """识别当前 MCP 工具集并嵌入落盘（连接/增删 MCP 服务器后调用）。失败不致命。"""
