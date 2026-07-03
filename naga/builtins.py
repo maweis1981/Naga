@@ -138,6 +138,30 @@ def _build_poster_prompt(city, w):
         f"crisp vector style. No text, no letters, no words."
     )
 
+def refine_poster_prompt(prompt, city, w):
+    """引擎兜底后处理 qwen 写的 prompt：删掉擅自加的 no-text、强制补上渲染天气文字要求 +
+    专业出图关键词。保证成品是「带清晰天气文字的高质量海报」，弥补小模型不听指令的问题。"""
+    import re
+    p = (prompt or "").strip()
+    # 1) 删掉模型擅自加的「no text / 无文字」类语句（它常违背指令）
+    p = re.sub(r"[^.。;；\n]*\b[Nn]o\s+(text|letters|words|typography)\b[^.。;；\n]*[.。;；]?", "", p)
+    p = re.sub(r"[^.。;；\n]*(不要文字|无文字|不含文字|避免文字)[^.。;；\n]*[.。;；]?", "", p)
+    p = re.sub(r"\s{2,}", " ", p).strip().rstrip(",，").strip()
+    cond = w.get("condition", ""); tc = w.get("temperature_c"); hi = w.get("today_high"); lo = w.get("today_low"); hu = w.get("humidity")
+    # 2) 强制补上「必须渲染这些文字」（拼写正确、清晰易读）
+    text_req = (f' IMPORTANT: clearly render this text ON the poster, correctly spelled and legible — '
+                f'title "{city}", a big temperature "{tc}°C", weather "{cond}", '
+                f'a line "H {hi}° L {lo}°", and "Humidity {hu}%".')
+    if "IMPORTANT: clearly render" not in p:
+        p += text_req
+    # 3) 强制补齐专业出图关键词（小模型常写不全）
+    quality = (" Cinematic soft lighting, tasteful color palette, subtle long shadows, "
+               "clean minimal composition, high detail, professional editorial poster, "
+               "trending on Behance, 8k, crisp vector illustration, vertical 4:5.")
+    p += quality
+    return p
+
+
 def _floniks_config():
     """从 ~/.naga/mcp.json 读一个 HTTP 型 MCP（floniks 优先）的 url + headers。"""
     import json as _j
@@ -196,6 +220,7 @@ def tool_weather_poster(city: str = "", model_alias: str = "nano_banana_2"):
             prompt = None
     if not prompt:                                    # LLM 未注入/失败 → 模板兜底
         prompt = _build_poster_prompt(city, w)
+    prompt = refine_poster_prompt(prompt, city, w)    # 引擎兜底：删no-text、补文字要求+专业关键词
     try:
         img = _floniks_generate(prompt, model_alias)
     except Exception as e:
