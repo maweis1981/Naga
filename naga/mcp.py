@@ -283,7 +283,9 @@ class MCPManager:
         for name, c in self.clients.items():
             for t in c.tools:
                 out.append({"server": name, "name": t["name"],
+                            "title": t.get("title", ""),
                             "description": t.get("description", ""),
+                            "annotations": t.get("annotations") or {},
                             "schema": t.get("inputSchema", {})})
         return out
 
