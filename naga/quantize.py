@@ -13,8 +13,7 @@
 
 from __future__ import annotations
 
-import mlx.core as mx
-import mlx.nn as nn
+from .backend import mx, nn
 
 
 class QuantizedLinear(nn.Module):

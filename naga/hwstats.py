@@ -15,7 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 
-import mlx.core as mx
+from .backend import mx
 import psutil
 
 _proc = psutil.Process(os.getpid())

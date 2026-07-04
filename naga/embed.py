@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import mlx.core as mx
+from .backend import mx
 from tokenizers import Tokenizer
 
 from .loader import ensure_local
