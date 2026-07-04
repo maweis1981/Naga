@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import mlx.core as mx
-import mlx.nn as nn
+from ..backend import mx, nn
 
 
 @dataclass

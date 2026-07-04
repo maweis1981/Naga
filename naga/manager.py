@@ -178,7 +178,7 @@ class ModelManager:
             self.engines.clear()           # 卸载所有旧模型
             gc.collect()
             try:
-                import mlx.core as mx
+                from .backend import mx
                 mx.clear_cache()
             except Exception:
                 pass

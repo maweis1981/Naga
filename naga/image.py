@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import io
 
-import mlx.core as mx
+from .backend import mx
 import numpy as np
 from PIL import Image
 

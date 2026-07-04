@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import mlx.core as mx
+from .backend import mx
 
 from .config import ModelArgs, load_config
 from .models import Model

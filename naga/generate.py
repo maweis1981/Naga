@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-import mlx.core as mx
+from .backend import mx
 
 
 def _sample(logits: mx.array, temp: float, top_p: float, top_k: int) -> int:

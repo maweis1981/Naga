@@ -11,8 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import mlx.core as mx
-import mlx.nn as nn
+from ..backend import mx, nn
 
 from ..config import ModelArgs
 from .qwen2 import Model as LanguageModel

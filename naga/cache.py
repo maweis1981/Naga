@@ -10,7 +10,7 @@ K/V 并追加进来。这样历史不再重算，生成从 O(n²) 降到 O(n)。
 
 from __future__ import annotations
 
-import mlx.core as mx
+from .backend import mx
 
 
 class KVCache:
